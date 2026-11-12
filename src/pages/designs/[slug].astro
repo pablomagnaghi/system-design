@@ -1,0 +1,332 @@
+---
+import type { GetStaticPaths } from 'astro';
+import { designs, type Design } from '../../content';
+import Walkthrough from '../../components/Walkthrough';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+export const getStaticPaths = (() =>
+  designs.map((design) => ({
+    params: { slug: design.slug },
+    props: { design },
+  }))) satisfies GetStaticPaths;
+
+interface Props {
+  design: Design;
+}
+
+const { design } = Astro.props;
+const others = designs.filter((other) => other.slug !== design.slug);
+---
+
+<BaseLayout title={design.title} description={design.summary}>
+  <article class="container">
+    <a href="/#designs" class="back">
+      ← All designs
+    </a>
+    <p class="eyebrow">{design.difficulty} · reference design</p>
+    <h1>{design.title}</h1>
+    <p class="summary">{design.summary}</p>
+
+    <nav class="toc" aria-label="Sections">
+      <a href="#requirements">1 · Requirements</a>
+      <a href="#entities">2 · Core entities</a>
+      <a href="#api">3 · API</a>
+      <a href="#data-flow">4 · Data flow</a>
+      <a href="#high-level">5 · High-level design</a>
+      <a href="#deep-dives">6 · Deep dives</a>
+    </nav>
+
+    <section id="requirements">
+      <h2>
+        <span class="step">1</span> Requirements
+      </h2>
+      <div class="columns">
+        <div>
+          <h3>Functional</h3>
+          <ul>
+            {design.requirements.functional.map((item) => (
+              <li>{item}</li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <h3>Non-functional</h3>
+          <ul>
+            {design.requirements.nonFunctional.map((item) => (
+              <li>{item}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+      <p class="muted small">
+        <strong>Out of scope:</strong> {design.requirements.outOfScope.join(' ')}
+      </p>
+    </section>
+
+    <section id="entities">
+      <h2>
+        <span class="step">2</span> Core entities
+      </h2>
+      <dl class="entities">
+        {design.entities.map((entity) => (
+          <div class="card">
+            <dt>{entity.name}</dt>
+            <dd>{entity.description}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+
+    <section id="api">
+      <h2>
+        <span class="step">3</span> API
+      </h2>
+      <div class="endpoints">
+        {design.api.map((endpoint) => (
+          <div class="endpoint">
+            <code>
+              <span class="method">{endpoint.method}</span> {endpoint.path}
+            </code>
+            <p class="muted">{endpoint.description}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section id="data-flow">
+      <h2>
+        <span class="step">4</span> Data flow
+      </h2>
+      <ol class="flow">
+        {design.dataFlow.map((item) => (
+          <li>{item}</li>
+        ))}
+      </ol>
+    </section>
+
+    <section id="high-level">
+      <h2>
+        <span class="step">5</span> High-level design
+      </h2>
+      <p class="muted">
+        Press play to follow one request through the system. Every step explains what happens and
+        the trade-off behind the choice.
+      </p>
+      <Walkthrough client:visible walkthrough={design.highLevel} />
+    </section>
+
+    <section id="deep-dives">
+      <h2>
+        <span class="step">6</span> Deep dives
+      </h2>
+      {design.deepDives.map((dive) => (
+        <div class="dive">
+          <h3>{dive.question}</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Option</th>
+                  <th scope="col">Gives</th>
+                  <th scope="col">Costs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dive.options.map((option) => (
+                  <tr>
+                    <th scope="row">{option.name}</th>
+                    <td>{option.pros}</td>
+                    <td>{option.cons}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p class="choice">
+            <strong>Choice.</strong> {dive.choice}
+          </p>
+        </div>
+      ))}
+    </section>
+
+    <section class="wrap-up">
+      <h2>In one sentence</h2>
+      <p>{design.wrapUp}</p>
+    </section>
+
+    <nav class="next" aria-label="Other designs">
+      {others.map((other) => (
+        <a href={`/designs/${other.slug}/`}>{other.title} →</a>
+      ))}
+    </nav>
+  </article>
+</BaseLayout>
+
+<style>
+  article {
+    padding-top: 48px;
+    padding-bottom: 80px;
+    max-width: 960px;
+  }
+  .back {
+    display: inline-block;
+    margin-bottom: 24px;
+  }
+  h1 {
+    font-size: clamp(2rem, 4.5vw, 2.8rem);
+    margin: 0 0 16px;
+  }
+  .summary {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    margin: 0 0 24px;
+  }
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .toc a {
+    font-size: 0.85rem;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+  }
+  .toc a:hover {
+    text-decoration: none;
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  section {
+    scroll-margin-top: 80px;
+    padding: 0;
+  }
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 56px 0 16px;
+    font-size: 1.5rem;
+  }
+  .step {
+    display: inline-grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 0.95rem;
+  }
+  h3 {
+    font-size: 1.05rem;
+    margin: 0 0 8px;
+  }
+  .columns {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+    gap: 24px;
+  }
+  ul,
+  .flow {
+    margin: 0;
+    padding-left: 20px;
+  }
+  li {
+    margin-bottom: 6px;
+  }
+  .small {
+    font-size: 0.92rem;
+    margin-top: 16px;
+  }
+  .entities {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+    gap: 12px;
+    margin: 0;
+  }
+  .entities dt {
+    font-weight: 700;
+  }
+  .entities dd {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+  }
+  .endpoints {
+    display: grid;
+    gap: 12px;
+  }
+  .endpoint code {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.9rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .method {
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .endpoint p {
+    margin: 6px 0 0;
+    font-size: 0.95rem;
+  }
+  .dive {
+    margin-bottom: 32px;
+  }
+  .table-wrap {
+    overflow-x: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.93rem;
+  }
+  th,
+  td {
+    text-align: left;
+    vertical-align: top;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  thead th {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  tbody th {
+    width: 28%;
+  }
+  td {
+    color: var(--text-muted);
+  }
+  .choice {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 8px 8px 0;
+  }
+  .wrap-up p {
+    font-size: 1.1rem;
+  }
+  .next {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+</style>
