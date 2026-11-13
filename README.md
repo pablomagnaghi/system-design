@@ -21,6 +21,7 @@ step and the trade-off behind it.
 | [Ride sharing](https://systems.pablomagnaghi.com/designs/ride-sharing/)                    | Hard       | Geo index, driver locks, matching queue               |
 | [Live comments](https://systems.pablomagnaghi.com/designs/live-comments/)                  | Medium     | SSE fan-out, pub/sub per video, hot streams           |
 | [Proximity search for places](https://systems.pablomagnaghi.com/designs/proximity-search/) | Medium     | Geohash cells, in-memory index, change streams        |
+| [Online auction](https://systems.pablomagnaghi.com/designs/online-auction/)                | Medium     | Conditional bids, soft close, live updates            |
 
 ## How each design is built
 

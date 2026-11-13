@@ -5,6 +5,7 @@ import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
+import { onlineAuction } from './designs/online-auction';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
@@ -30,6 +31,7 @@ export const designs: readonly Design[] = [
   rideSharing,
   liveComments,
   proximitySearch,
+  onlineAuction,
 ];
 
 export function getDesign(slug: string): Design | undefined {
