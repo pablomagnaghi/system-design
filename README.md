@@ -18,6 +18,7 @@ step and the trade-off behind it.
 | [Chat messaging](https://systems.pablomagnaghi.com/designs/chat-messaging/)              | Hard       | WebSocket gateways, sequence numbers, catch-up sync   |
 | [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                        | Medium     | Hybrid fan-out, capped feed lists, cursor paging      |
 | [Video upload and streaming](https://systems.pablomagnaghi.com/designs/video-streaming/) | Hard       | Multipart uploads, chunked transcoding, adaptive CDN  |
+| [Ride sharing](https://systems.pablomagnaghi.com/designs/ride-sharing/)                  | Hard       | Geo index, driver locks, matching queue               |
 
 ## How each design is built
 

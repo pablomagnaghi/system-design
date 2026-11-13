@@ -6,6 +6,7 @@ import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
+import { rideSharing } from './designs/ride-sharing';
 import { urlShortener } from './designs/url-shortener';
 import { videoStreaming } from './designs/video-streaming';
 import type { Design } from './types';
@@ -24,6 +25,7 @@ export const designs: readonly Design[] = [
   chatMessaging,
   newsFeed,
   videoStreaming,
+  rideSharing,
 ];
 
 export function getDesign(slug: string): Design | undefined {
