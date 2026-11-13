@@ -4,6 +4,7 @@ import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
+import { metricsMonitoring } from './designs/metrics-monitoring';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { onlineAuction } from './designs/online-auction';
@@ -38,6 +39,7 @@ export const designs: readonly Design[] = [
   topK,
   webCrawler,
   adClickAggregator,
+  metricsMonitoring,
 ];
 
 export function getDesign(slug: string): Design | undefined {
