@@ -1,6 +1,7 @@
 import { adClickAggregator } from './designs/ad-click-aggregator';
 import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
+import { collaborativeEditor } from './designs/collaborative-editor';
 import { distributedCache } from './designs/distributed-cache';
 import { fileSync } from './designs/file-sync';
 import { jobScheduler } from './designs/job-scheduler';
@@ -42,6 +43,7 @@ export const designs: readonly Design[] = [
   adClickAggregator,
   metricsMonitoring,
   fileSync,
+  collaborativeEditor,
 ];
 
 export function getDesign(slug: string): Design | undefined {
