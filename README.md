@@ -6,14 +6,15 @@ step and the trade-off behind it.
 
 **Live site:** https://systems.pablomagnaghi.com
 
-| Design                                                                                   | Difficulty | Focus                                                 |
-| ---------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------- |
-| [Distributed rate limiter](https://systems.pablomagnaghi.com/designs/rate-limiter/)      | Medium     | Token buckets, atomic counters, failing open          |
-| [Notification system](https://systems.pablomagnaghi.com/designs/notification-system/)    | Medium     | Priority queues, idempotency, provider isolation      |
-| [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/) | Hard       | Inbox pattern, state machines, reconciliation         |
-| [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)    | Hard       | Atomic night claims, holds, channel sync              |
-| [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)        | Medium     | Consistent hashing, single-flight loads, invalidation |
-| [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)    | Medium     | Partition leases, atomic claims, idempotent workers   |
+| Design                                                                                     | Difficulty | Focus                                                 |
+| ------------------------------------------------------------------------------------------ | ---------- | ----------------------------------------------------- |
+| [Distributed rate limiter](https://systems.pablomagnaghi.com/designs/rate-limiter/)        | Medium     | Token buckets, atomic counters, failing open          |
+| [Notification system](https://systems.pablomagnaghi.com/designs/notification-system/)      | Medium     | Priority queues, idempotency, provider isolation      |
+| [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/)   | Hard       | Inbox pattern, state machines, reconciliation         |
+| [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)      | Hard       | Atomic night claims, holds, channel sync              |
+| [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)          | Medium     | Consistent hashing, single-flight loads, invalidation |
+| [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)      | Medium     | Partition leases, atomic claims, idempotent workers   |
+| [Proximity search for places](https://systems.pablomagnaghi.com/designs/proximity-search/) | Medium     | Geohash cells, in-memory index, change streams        |
 
 ## How each design is built
 
