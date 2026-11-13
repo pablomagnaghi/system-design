@@ -6,6 +6,7 @@ import { liveComments } from './designs/live-comments';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
+import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
 import { rideSharing } from './designs/ride-sharing';
 import { urlShortener } from './designs/url-shortener';
@@ -28,6 +29,7 @@ export const designs: readonly Design[] = [
   videoStreaming,
   rideSharing,
   liveComments,
+  proximitySearch,
 ];
 
 export function getDesign(slug: string): Design | undefined {
