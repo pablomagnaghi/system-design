@@ -2,6 +2,7 @@ import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
+import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
@@ -20,6 +21,7 @@ export const designs: readonly Design[] = [
   jobScheduler,
   urlShortener,
   chatMessaging,
+  newsFeed,
 ];
 
 export function getDesign(slug: string): Design | undefined {

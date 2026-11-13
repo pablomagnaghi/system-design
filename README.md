@@ -16,6 +16,7 @@ step and the trade-off behind it.
 | [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)    | Medium     | Partition leases, atomic claims, idempotent workers   |
 | [URL shortener](https://systems.pablomagnaghi.com/designs/url-shortener/)                | Easy       | Leased ID ranges, read-through cache, click stream    |
 | [Chat messaging](https://systems.pablomagnaghi.com/designs/chat-messaging/)              | Hard       | WebSocket gateways, sequence numbers, catch-up sync   |
+| [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                        | Medium     | Hybrid fan-out, capped feed lists, cursor paging      |
 
 ## How each design is built
 
