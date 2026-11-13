@@ -1,3 +1,4 @@
+import { bookingSystem } from './designs/booking-system';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
@@ -6,7 +7,12 @@ import type { Design } from './types';
 export type * from './types';
 
 /** Every published design, in the order they appear on the cover. */
-export const designs: readonly Design[] = [rateLimiter, notificationSystem, paymentWebhooks];
+export const designs: readonly Design[] = [
+  rateLimiter,
+  notificationSystem,
+  paymentWebhooks,
+  bookingSystem,
+];
 
 export function getDesign(slug: string): Design | undefined {
   return designs.find((design) => design.slug === slug);
