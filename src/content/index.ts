@@ -10,6 +10,7 @@ import { paymentWebhooks } from './designs/payment-webhooks';
 import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
 import { rideSharing } from './designs/ride-sharing';
+import { topK } from './designs/top-k';
 import { urlShortener } from './designs/url-shortener';
 import { videoStreaming } from './designs/video-streaming';
 import type { Design } from './types';
@@ -32,6 +33,7 @@ export const designs: readonly Design[] = [
   liveComments,
   proximitySearch,
   onlineAuction,
+  topK,
 ];
 
 export function getDesign(slug: string): Design | undefined {

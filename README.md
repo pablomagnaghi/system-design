@@ -6,22 +6,23 @@ step and the trade-off behind it.
 
 **Live site:** https://systems.pablomagnaghi.com
 
-| Design                                                                                     | Difficulty | Focus                                                 |
-| ------------------------------------------------------------------------------------------ | ---------- | ----------------------------------------------------- |
-| [Distributed rate limiter](https://systems.pablomagnaghi.com/designs/rate-limiter/)        | Medium     | Token buckets, atomic counters, failing open          |
-| [Notification system](https://systems.pablomagnaghi.com/designs/notification-system/)      | Medium     | Priority queues, idempotency, provider isolation      |
-| [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/)   | Hard       | Inbox pattern, state machines, reconciliation         |
-| [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)      | Hard       | Atomic night claims, holds, channel sync              |
-| [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)          | Medium     | Consistent hashing, single-flight loads, invalidation |
-| [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)      | Medium     | Partition leases, atomic claims, idempotent workers   |
-| [URL shortener](https://systems.pablomagnaghi.com/designs/url-shortener/)                  | Easy       | Leased ID ranges, read-through cache, click stream    |
-| [Chat messaging](https://systems.pablomagnaghi.com/designs/chat-messaging/)                | Hard       | WebSocket gateways, sequence numbers, catch-up sync   |
-| [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                          | Medium     | Hybrid fan-out, capped feed lists, cursor paging      |
-| [Video upload and streaming](https://systems.pablomagnaghi.com/designs/video-streaming/)   | Hard       | Multipart uploads, chunked transcoding, adaptive CDN  |
-| [Ride sharing](https://systems.pablomagnaghi.com/designs/ride-sharing/)                    | Hard       | Geo index, driver locks, matching queue               |
-| [Live comments](https://systems.pablomagnaghi.com/designs/live-comments/)                  | Medium     | SSE fan-out, pub/sub per video, hot streams           |
-| [Proximity search for places](https://systems.pablomagnaghi.com/designs/proximity-search/) | Medium     | Geohash cells, in-memory index, change streams        |
-| [Online auction](https://systems.pablomagnaghi.com/designs/online-auction/)                | Medium     | Conditional bids, soft close, live updates            |
+| Design                                                                                     | Difficulty | Focus                                                    |
+| ------------------------------------------------------------------------------------------ | ---------- | -------------------------------------------------------- |
+| [Distributed rate limiter](https://systems.pablomagnaghi.com/designs/rate-limiter/)        | Medium     | Token buckets, atomic counters, failing open             |
+| [Notification system](https://systems.pablomagnaghi.com/designs/notification-system/)      | Medium     | Priority queues, idempotency, provider isolation         |
+| [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/)   | Hard       | Inbox pattern, state machines, reconciliation            |
+| [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)      | Hard       | Atomic night claims, holds, channel sync                 |
+| [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)          | Medium     | Consistent hashing, single-flight loads, invalidation    |
+| [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)      | Medium     | Partition leases, atomic claims, idempotent workers      |
+| [URL shortener](https://systems.pablomagnaghi.com/designs/url-shortener/)                  | Easy       | Leased ID ranges, read-through cache, click stream       |
+| [Chat messaging](https://systems.pablomagnaghi.com/designs/chat-messaging/)                | Hard       | WebSocket gateways, sequence numbers, catch-up sync      |
+| [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                          | Medium     | Hybrid fan-out, capped feed lists, cursor paging         |
+| [Video upload and streaming](https://systems.pablomagnaghi.com/designs/video-streaming/)   | Hard       | Multipart uploads, chunked transcoding, adaptive CDN     |
+| [Ride sharing](https://systems.pablomagnaghi.com/designs/ride-sharing/)                    | Hard       | Geo index, driver locks, matching queue                  |
+| [Live comments](https://systems.pablomagnaghi.com/designs/live-comments/)                  | Medium     | SSE fan-out, pub/sub per video, hot streams              |
+| [Proximity search for places](https://systems.pablomagnaghi.com/designs/proximity-search/) | Medium     | Geohash cells, in-memory index, change streams           |
+| [Online auction](https://systems.pablomagnaghi.com/designs/online-auction/)                | Medium     | Conditional bids, soft close, live updates               |
+| [Top-K trending items](https://systems.pablomagnaghi.com/designs/top-k/)                   | Hard       | Partitioned counting, local heaps, precomputed snapshots |
 
 ## How each design is built
 
