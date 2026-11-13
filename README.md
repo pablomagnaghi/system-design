@@ -28,6 +28,7 @@ step and the trade-off behind it.
 | [Metrics monitoring and alerting](https://systems.pablomagnaghi.com/designs/metrics-monitoring/) | Hard       | Time-series storage, cardinality limits, alert routing          |
 | [File sync and storage](https://systems.pablomagnaghi.com/designs/file-sync/)                    | Hard       | Content-defined chunks, base-version commits, change cursors    |
 | [Collaborative document editor](https://systems.pablomagnaghi.com/designs/collaborative-editor/) | Hard       | Operational transformation, one session per document, snapshots |
+| [Post search](https://systems.pablomagnaghi.com/designs/post-search/)                            | Medium     | Inverted index, fan-out and merge, hot and cold tiers           |
 
 ## How each design is built
 
