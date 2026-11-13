@@ -13,6 +13,7 @@ step and the trade-off behind it.
 | [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/) | Hard       | Inbox pattern, state machines, reconciliation         |
 | [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)    | Hard       | Atomic night claims, holds, channel sync              |
 | [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)        | Medium     | Consistent hashing, single-flight loads, invalidation |
+| [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)    | Medium     | Partition leases, atomic claims, idempotent workers   |
 
 ## How each design is built
 
