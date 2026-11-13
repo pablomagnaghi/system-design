@@ -1,5 +1,6 @@
 import { bookingSystem } from './designs/booking-system';
 import { distributedCache } from './designs/distributed-cache';
+import { fileSync } from './designs/file-sync';
 import { jobScheduler } from './designs/job-scheduler';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
@@ -16,6 +17,7 @@ export const designs: readonly Design[] = [
   bookingSystem,
   distributedCache,
   jobScheduler,
+  fileSync,
 ];
 
 export function getDesign(slug: string): Design | undefined {
