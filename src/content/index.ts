@@ -1,4 +1,5 @@
 import { bookingSystem } from './designs/booking-system';
+import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
 import { notificationSystem } from './designs/notification-system';
@@ -18,6 +19,7 @@ export const designs: readonly Design[] = [
   distributedCache,
   jobScheduler,
   urlShortener,
+  chatMessaging,
 ];
 
 export function getDesign(slug: string): Design | undefined {
