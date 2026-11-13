@@ -1,10 +1,16 @@
 import { bookingSystem } from './designs/booking-system';
+import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
+import { liveComments } from './designs/live-comments';
+import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
+import { rideSharing } from './designs/ride-sharing';
+import { urlShortener } from './designs/url-shortener';
+import { videoStreaming } from './designs/video-streaming';
 import type { Design } from './types';
 
 export type * from './types';
@@ -17,6 +23,12 @@ export const designs: readonly Design[] = [
   bookingSystem,
   distributedCache,
   jobScheduler,
+  urlShortener,
+  chatMessaging,
+  newsFeed,
+  videoStreaming,
+  rideSharing,
+  liveComments,
   proximitySearch,
 ];
 
