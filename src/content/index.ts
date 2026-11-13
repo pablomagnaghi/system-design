@@ -1,4 +1,5 @@
 import { bookingSystem } from './designs/booking-system';
+import { distributedCache } from './designs/distributed-cache';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
@@ -12,6 +13,7 @@ export const designs: readonly Design[] = [
   notificationSystem,
   paymentWebhooks,
   bookingSystem,
+  distributedCache,
 ];
 
 export function getDesign(slug: string): Design | undefined {
