@@ -1,3 +1,4 @@
+import { adClickAggregator } from './designs/ad-click-aggregator';
 import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
@@ -36,6 +37,7 @@ export const designs: readonly Design[] = [
   onlineAuction,
   topK,
   webCrawler,
+  adClickAggregator,
 ];
 
 export function getDesign(slug: string): Design | undefined {

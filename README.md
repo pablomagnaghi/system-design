@@ -24,6 +24,7 @@ step and the trade-off behind it.
 | [Online auction](https://systems.pablomagnaghi.com/designs/online-auction/)                | Medium     | Conditional bids, soft close, live updates               |
 | [Top-K trending items](https://systems.pablomagnaghi.com/designs/top-k/)                   | Hard       | Partitioned counting, local heaps, precomputed snapshots |
 | [Web crawler](https://systems.pablomagnaghi.com/designs/web-crawler/)                      | Hard       | Per-host frontier, politeness, deduplication             |
+| [Ad click aggregator](https://systems.pablomagnaghi.com/designs/ad-click-aggregator/)      | Hard       | Stream dedup, minute windows, daily reconciliation       |
 
 ## How each design is built
 
