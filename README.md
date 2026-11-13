@@ -6,11 +6,12 @@ step and the trade-off behind it.
 
 **Live site:** https://systems.pablomagnaghi.com
 
-| Design                                                                                   | Difficulty | Focus                                            |
-| ---------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------ |
-| [Distributed rate limiter](https://systems.pablomagnaghi.com/designs/rate-limiter/)      | Medium     | Token buckets, atomic counters, failing open     |
-| [Notification system](https://systems.pablomagnaghi.com/designs/notification-system/)    | Medium     | Priority queues, idempotency, provider isolation |
-| [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/) | Hard       | Inbox pattern, state machines, reconciliation    |
+| Design                                                                                   | Difficulty | Focus                                                 |
+| ---------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------- |
+| [Distributed rate limiter](https://systems.pablomagnaghi.com/designs/rate-limiter/)      | Medium     | Token buckets, atomic counters, failing open          |
+| [Notification system](https://systems.pablomagnaghi.com/designs/notification-system/)    | Medium     | Priority queues, idempotency, provider isolation      |
+| [Payment webhook processor](https://systems.pablomagnaghi.com/designs/payment-webhooks/) | Hard       | Inbox pattern, state machines, reconciliation         |
+| [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)        | Medium     | Consistent hashing, single-flight loads, invalidation |
 
 ## How each design is built
 
