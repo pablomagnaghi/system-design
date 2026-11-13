@@ -74,8 +74,8 @@ export const webCrawler: Design = {
       { id: 'dns', title: 'DNS cache', detail: 'Resolve hosts', column: 2, row: 'top' },
       { id: 'blobs', title: 'Blob storage', detail: 'Raw pages', column: 3, row: 'top' },
       { id: 'parsers', title: 'Parsers', detail: 'Extract links', column: 3, row: 'middle' },
-      { id: 'dedup', title: 'Seen filter', detail: 'URLs and content', column: 4, row: 'middle' },
-      { id: 'urls', title: 'URL store', detail: 'State per URL', column: 5, row: 'middle' },
+      { id: 'dedup', title: 'Seen filter', detail: 'URLs and content', column: 2, row: 'bottom' },
+      { id: 'urls', title: 'URL store', detail: 'State per URL', column: 1, row: 'bottom' },
     ],
     edges: [
       ['seeds', 'frontier'],
