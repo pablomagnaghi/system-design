@@ -14,6 +14,7 @@ step and the trade-off behind it.
 | [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)    | Hard       | Atomic night claims, holds, channel sync              |
 | [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)        | Medium     | Consistent hashing, single-flight loads, invalidation |
 | [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)    | Medium     | Partition leases, atomic claims, idempotent workers   |
+| [Live comments](https://systems.pablomagnaghi.com/designs/live-comments/)                | Medium     | SSE fan-out, pub/sub per video, hot streams           |
 
 ## How each design is built
 
