@@ -1,3 +1,5 @@
+import { bookingSystem } from './designs/booking-system';
+import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
@@ -11,6 +13,8 @@ export const designs: readonly Design[] = [
   rateLimiter,
   notificationSystem,
   paymentWebhooks,
+  bookingSystem,
+  distributedCache,
   jobScheduler,
 ];
 
