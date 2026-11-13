@@ -1,10 +1,12 @@
 import { bookingSystem } from './designs/booking-system';
+import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
+import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
-import { newsFeed } from './designs/news-feed';
+import { urlShortener } from './designs/url-shortener';
 import type { Design } from './types';
 
 export type * from './types';
@@ -17,6 +19,8 @@ export const designs: readonly Design[] = [
   bookingSystem,
   distributedCache,
   jobScheduler,
+  urlShortener,
+  chatMessaging,
   newsFeed,
 ];
 
