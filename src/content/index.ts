@@ -1,10 +1,22 @@
+import { adClickAggregator } from './designs/ad-click-aggregator';
 import { bookingSystem } from './designs/booking-system';
+import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { fileSync } from './designs/file-sync';
 import { jobScheduler } from './designs/job-scheduler';
+import { liveComments } from './designs/live-comments';
+import { metricsMonitoring } from './designs/metrics-monitoring';
+import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
+import { onlineAuction } from './designs/online-auction';
 import { paymentWebhooks } from './designs/payment-webhooks';
+import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
+import { rideSharing } from './designs/ride-sharing';
+import { topK } from './designs/top-k';
+import { urlShortener } from './designs/url-shortener';
+import { videoStreaming } from './designs/video-streaming';
+import { webCrawler } from './designs/web-crawler';
 import type { Design } from './types';
 
 export type * from './types';
@@ -17,6 +29,18 @@ export const designs: readonly Design[] = [
   bookingSystem,
   distributedCache,
   jobScheduler,
+  urlShortener,
+  chatMessaging,
+  newsFeed,
+  videoStreaming,
+  rideSharing,
+  liveComments,
+  proximitySearch,
+  onlineAuction,
+  topK,
+  webCrawler,
+  adClickAggregator,
+  metricsMonitoring,
   fileSync,
 ];
 
