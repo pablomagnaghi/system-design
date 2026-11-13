@@ -7,6 +7,7 @@ import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
 import { urlShortener } from './designs/url-shortener';
+import { videoStreaming } from './designs/video-streaming';
 import type { Design } from './types';
 
 export type * from './types';
@@ -22,6 +23,7 @@ export const designs: readonly Design[] = [
   urlShortener,
   chatMessaging,
   newsFeed,
+  videoStreaming,
 ];
 
 export function getDesign(slug: string): Design | undefined {
