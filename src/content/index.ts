@@ -13,6 +13,7 @@ import { rideSharing } from './designs/ride-sharing';
 import { topK } from './designs/top-k';
 import { urlShortener } from './designs/url-shortener';
 import { videoStreaming } from './designs/video-streaming';
+import { webCrawler } from './designs/web-crawler';
 import type { Design } from './types';
 
 export type * from './types';
@@ -34,6 +35,7 @@ export const designs: readonly Design[] = [
   proximitySearch,
   onlineAuction,
   topK,
+  webCrawler,
 ];
 
 export function getDesign(slug: string): Design | undefined {

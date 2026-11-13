@@ -23,6 +23,7 @@ step and the trade-off behind it.
 | [Proximity search for places](https://systems.pablomagnaghi.com/designs/proximity-search/) | Medium     | Geohash cells, in-memory index, change streams           |
 | [Online auction](https://systems.pablomagnaghi.com/designs/online-auction/)                | Medium     | Conditional bids, soft close, live updates               |
 | [Top-K trending items](https://systems.pablomagnaghi.com/designs/top-k/)                   | Hard       | Partitioned counting, local heaps, precomputed snapshots |
+| [Web crawler](https://systems.pablomagnaghi.com/designs/web-crawler/)                      | Hard       | Per-host frontier, politeness, deduplication             |
 
 ## How each design is built
 
