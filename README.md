@@ -29,6 +29,7 @@ step and the trade-off behind it.
 | [File sync and storage](https://systems.pablomagnaghi.com/designs/file-sync/)                    | Hard       | Content-defined chunks, base-version commits, change cursors    |
 | [Collaborative document editor](https://systems.pablomagnaghi.com/designs/collaborative-editor/) | Hard       | Operational transformation, one session per document, snapshots |
 | [Post search](https://systems.pablomagnaghi.com/designs/post-search/)                            | Medium     | Inverted index, fan-out and merge, hot and cold tiers           |
+| [Flash sale](https://systems.pablomagnaghi.com/designs/flash-sale/)                              | Hard       | Waiting rooms, in-memory stock, bot defenses                    |
 
 ## How each design is built
 

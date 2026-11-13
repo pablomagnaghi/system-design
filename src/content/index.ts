@@ -4,6 +4,7 @@ import { chatMessaging } from './designs/chat-messaging';
 import { collaborativeEditor } from './designs/collaborative-editor';
 import { distributedCache } from './designs/distributed-cache';
 import { fileSync } from './designs/file-sync';
+import { flashSale } from './designs/flash-sale';
 import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
 import { metricsMonitoring } from './designs/metrics-monitoring';
@@ -46,6 +47,7 @@ export const designs: readonly Design[] = [
   fileSync,
   collaborativeEditor,
   postSearch,
+  flashSale,
 ];
 
 export function getDesign(slug: string): Design | undefined {
