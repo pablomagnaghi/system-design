@@ -2,6 +2,7 @@ import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
 import { jobScheduler } from './designs/job-scheduler';
+import { liveComments } from './designs/live-comments';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
@@ -26,6 +27,7 @@ export const designs: readonly Design[] = [
   newsFeed,
   videoStreaming,
   rideSharing,
+  liveComments,
 ];
 
 export function getDesign(slug: string): Design | undefined {

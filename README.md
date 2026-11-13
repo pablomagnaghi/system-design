@@ -19,6 +19,7 @@ step and the trade-off behind it.
 | [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                        | Medium     | Hybrid fan-out, capped feed lists, cursor paging      |
 | [Video upload and streaming](https://systems.pablomagnaghi.com/designs/video-streaming/) | Hard       | Multipart uploads, chunked transcoding, adaptive CDN  |
 | [Ride sharing](https://systems.pablomagnaghi.com/designs/ride-sharing/)                  | Hard       | Geo index, driver locks, matching queue               |
+| [Live comments](https://systems.pablomagnaghi.com/designs/live-comments/)                | Medium     | SSE fan-out, pub/sub per video, hot streams           |
 
 ## How each design is built
 
