@@ -2,6 +2,7 @@ import { adClickAggregator } from './designs/ad-click-aggregator';
 import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
 import { distributedCache } from './designs/distributed-cache';
+import { fileSync } from './designs/file-sync';
 import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
 import { metricsMonitoring } from './designs/metrics-monitoring';
@@ -40,6 +41,7 @@ export const designs: readonly Design[] = [
   webCrawler,
   adClickAggregator,
   metricsMonitoring,
+  fileSync,
 ];
 
 export function getDesign(slug: string): Design | undefined {
