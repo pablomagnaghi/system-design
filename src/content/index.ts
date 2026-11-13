@@ -4,6 +4,7 @@ import { jobScheduler } from './designs/job-scheduler';
 import { notificationSystem } from './designs/notification-system';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { rateLimiter } from './designs/rate-limiter';
+import { topK } from './designs/top-k';
 import type { Design } from './types';
 
 export type * from './types';
@@ -16,6 +17,7 @@ export const designs: readonly Design[] = [
   bookingSystem,
   distributedCache,
   jobScheduler,
+  topK,
 ];
 
 export function getDesign(slug: string): Design | undefined {
