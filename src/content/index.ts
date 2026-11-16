@@ -2,6 +2,7 @@ import { adClickAggregator } from './designs/ad-click-aggregator';
 import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
 import { collaborativeEditor } from './designs/collaborative-editor';
+import { datingMatches } from './designs/dating-matches';
 import { distributedCache } from './designs/distributed-cache';
 import { fileSync } from './designs/file-sync';
 import { fitnessTracking } from './designs/fitness-tracking';
@@ -49,6 +50,7 @@ export const designs: readonly Design[] = [
   liveComments,
   llmChat,
   proximitySearch,
+  datingMatches,
   onlineAuction,
   onlineChess,
   topK,
