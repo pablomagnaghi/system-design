@@ -25,6 +25,7 @@ step and the trade-off behind it.
 | [Live comments](https://systems.pablomagnaghi.com/designs/live-comments/)                        | Medium     | SSE fan-out, pub/sub per video, hot streams                     |
 | [LLM chat assistant](https://systems.pablomagnaghi.com/designs/llm-chat/)                        | Hard       | Resumable SSE streams, GPU priority queues, token-based limits  |
 | [Proximity search for places](https://systems.pablomagnaghi.com/designs/proximity-search/)       | Medium     | Geohash cells, in-memory index, change streams                  |
+| [Dating app matching](https://systems.pablomagnaghi.com/designs/dating-matches/)                 | Medium     | Precomputed stacks, Bloom filters, atomic pair keys             |
 | [Online auction](https://systems.pablomagnaghi.com/designs/online-auction/)                      | Medium     | Conditional bids, soft close, live updates                      |
 | [Online chess](https://systems.pablomagnaghi.com/designs/online-chess/)                          | Medium     | Widening rating window, server clocks, game shards              |
 | [Top-K trending items](https://systems.pablomagnaghi.com/designs/top-k/)                         | Hard       | Partitioned counting, local heaps, precomputed snapshots        |
