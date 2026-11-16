@@ -4,6 +4,7 @@ import { chatMessaging } from './designs/chat-messaging';
 import { collaborativeEditor } from './designs/collaborative-editor';
 import { distributedCache } from './designs/distributed-cache';
 import { fileSync } from './designs/file-sync';
+import { fitnessTracking } from './designs/fitness-tracking';
 import { flashSale } from './designs/flash-sale';
 import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
@@ -39,6 +40,7 @@ export const designs: readonly Design[] = [
   newsFeed,
   videoStreaming,
   rideSharing,
+  fitnessTracking,
   liveComments,
   proximitySearch,
   onlineAuction,
