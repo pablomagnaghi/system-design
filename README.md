@@ -19,6 +19,7 @@ step and the trade-off behind it.
 | [URL shortener](https://systems.pablomagnaghi.com/designs/url-shortener/)                        | Easy       | Leased ID ranges, read-through cache, click stream              |
 | [Chat messaging](https://systems.pablomagnaghi.com/designs/chat-messaging/)                      | Hard       | WebSocket gateways, sequence numbers, catch-up sync             |
 | [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                                | Medium     | Hybrid fan-out, capped feed lists, cursor paging                |
+| [Photo sharing](https://systems.pablomagnaghi.com/designs/photo-sharing/)                        | Medium     | Presigned uploads, image variants, immutable CDN URLs           |
 | [Video upload and streaming](https://systems.pablomagnaghi.com/designs/video-streaming/)         | Hard       | Multipart uploads, chunked transcoding, adaptive CDN            |
 | [Ride sharing](https://systems.pablomagnaghi.com/designs/ride-sharing/)                          | Hard       | Geo index, driver locks, matching queue                         |
 | [Fitness activity tracking](https://systems.pablomagnaghi.com/designs/fitness-tracking/)         | Medium     | Offline recording, segment cell index, sorted-set leaderboards  |
