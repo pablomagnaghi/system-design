@@ -14,6 +14,7 @@ import { newsAggregator } from './designs/news-aggregator';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { onlineAuction } from './designs/online-auction';
+import { onlineChess } from './designs/online-chess';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { postSearch } from './designs/post-search';
 import { priceTracker } from './designs/price-tracker';
@@ -49,6 +50,7 @@ export const designs: readonly Design[] = [
   llmChat,
   proximitySearch,
   onlineAuction,
+  onlineChess,
   topK,
   webCrawler,
   newsAggregator,
