@@ -18,6 +18,7 @@ import { notificationSystem } from './designs/notification-system';
 import { onlineAuction } from './designs/online-auction';
 import { onlineChess } from './designs/online-chess';
 import { paymentWebhooks } from './designs/payment-webhooks';
+import { photoSharing } from './designs/photo-sharing';
 import { postSearch } from './designs/post-search';
 import { priceTracker } from './designs/price-tracker';
 import { proximitySearch } from './designs/proximity-search';
@@ -45,6 +46,7 @@ export const designs: readonly Design[] = [
   urlShortener,
   chatMessaging,
   newsFeed,
+  photoSharing,
   videoStreaming,
   rideSharing,
   fitnessTracking,
