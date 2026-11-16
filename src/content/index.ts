@@ -1,6 +1,7 @@
 import { adClickAggregator } from './designs/ad-click-aggregator';
 import { bookingSystem } from './designs/booking-system';
 import { chatMessaging } from './designs/chat-messaging';
+import { codeJudge } from './designs/code-judge';
 import { collaborativeEditor } from './designs/collaborative-editor';
 import { datingMatches } from './designs/dating-matches';
 import { distributedCache } from './designs/distributed-cache';
@@ -43,6 +44,7 @@ export const designs: readonly Design[] = [
   bookingSystem,
   distributedCache,
   jobScheduler,
+  codeJudge,
   urlShortener,
   chatMessaging,
   newsFeed,
