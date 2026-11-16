@@ -8,6 +8,7 @@ import { fitnessTracking } from './designs/fitness-tracking';
 import { flashSale } from './designs/flash-sale';
 import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
+import { llmChat } from './designs/llm-chat';
 import { metricsMonitoring } from './designs/metrics-monitoring';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
@@ -42,6 +43,7 @@ export const designs: readonly Design[] = [
   rideSharing,
   fitnessTracking,
   liveComments,
+  llmChat,
   proximitySearch,
   onlineAuction,
   topK,
