@@ -16,6 +16,7 @@ import { postSearch } from './designs/post-search';
 import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
 import { rideSharing } from './designs/ride-sharing';
+import { stockTrading } from './designs/stock-trading';
 import { topK } from './designs/top-k';
 import { urlShortener } from './designs/url-shortener';
 import { videoStreaming } from './designs/video-streaming';
@@ -29,6 +30,7 @@ export const designs: readonly Design[] = [
   rateLimiter,
   notificationSystem,
   paymentWebhooks,
+  stockTrading,
   bookingSystem,
   distributedCache,
   jobScheduler,
