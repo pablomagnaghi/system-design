@@ -16,6 +16,7 @@ step and the trade-off behind it.
 | [Booking system for stays](https://systems.pablomagnaghi.com/designs/booking-system/)            | Hard       | Atomic night claims, holds, channel sync                        |
 | [Distributed cache](https://systems.pablomagnaghi.com/designs/distributed-cache/)                | Medium     | Consistent hashing, single-flight loads, invalidation           |
 | [Distributed job scheduler](https://systems.pablomagnaghi.com/designs/job-scheduler/)            | Medium     | Partition leases, atomic claims, idempotent workers             |
+| [Online code judge](https://systems.pablomagnaghi.com/designs/code-judge/)                       | Hard       | MicroVM sandboxes, contest pre-scaling, sorted-set leaderboard  |
 | [URL shortener](https://systems.pablomagnaghi.com/designs/url-shortener/)                        | Easy       | Leased ID ranges, read-through cache, click stream              |
 | [Chat messaging](https://systems.pablomagnaghi.com/designs/chat-messaging/)                      | Hard       | WebSocket gateways, sequence numbers, catch-up sync             |
 | [News feed](https://systems.pablomagnaghi.com/designs/news-feed/)                                | Medium     | Hybrid fan-out, capped feed lists, cursor paging                |
