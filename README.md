@@ -37,6 +37,7 @@ step and the trade-off behind it.
 | [Collaborative document editor](https://systems.pablomagnaghi.com/designs/collaborative-editor/) | Hard       | Operational transformation, one session per document, snapshots |
 | [Post search](https://systems.pablomagnaghi.com/designs/post-search/)                            | Medium     | Inverted index, fan-out and merge, hot and cold tiers           |
 | [Flash sale](https://systems.pablomagnaghi.com/designs/flash-sale/)                              | Hard       | Waiting rooms, in-memory stock, bot defenses                    |
+| [Local delivery](https://systems.pablomagnaghi.com/designs/local-delivery/)                      | Medium     | Reachable warehouses, conditional decrements, cached reads      |
 
 ## How each design is built
 

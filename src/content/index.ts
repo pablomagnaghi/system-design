@@ -10,6 +10,7 @@ import { flashSale } from './designs/flash-sale';
 import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
 import { llmChat } from './designs/llm-chat';
+import { localDelivery } from './designs/local-delivery';
 import { metricsMonitoring } from './designs/metrics-monitoring';
 import { newsAggregator } from './designs/news-aggregator';
 import { newsFeed } from './designs/news-feed';
@@ -62,6 +63,7 @@ export const designs: readonly Design[] = [
   collaborativeEditor,
   postSearch,
   flashSale,
+  localDelivery,
 ];
 
 export function getDesign(slug: string): Design | undefined {
