@@ -10,6 +10,7 @@ import { jobScheduler } from './designs/job-scheduler';
 import { liveComments } from './designs/live-comments';
 import { llmChat } from './designs/llm-chat';
 import { metricsMonitoring } from './designs/metrics-monitoring';
+import { newsAggregator } from './designs/news-aggregator';
 import { newsFeed } from './designs/news-feed';
 import { notificationSystem } from './designs/notification-system';
 import { onlineAuction } from './designs/online-auction';
@@ -48,6 +49,7 @@ export const designs: readonly Design[] = [
   onlineAuction,
   topK,
   webCrawler,
+  newsAggregator,
   adClickAggregator,
   metricsMonitoring,
   fileSync,
