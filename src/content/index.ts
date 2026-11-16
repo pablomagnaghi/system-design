@@ -16,6 +16,7 @@ import { notificationSystem } from './designs/notification-system';
 import { onlineAuction } from './designs/online-auction';
 import { paymentWebhooks } from './designs/payment-webhooks';
 import { postSearch } from './designs/post-search';
+import { priceTracker } from './designs/price-tracker';
 import { proximitySearch } from './designs/proximity-search';
 import { rateLimiter } from './designs/rate-limiter';
 import { rideSharing } from './designs/ride-sharing';
@@ -32,6 +33,7 @@ export type * from './types';
 export const designs: readonly Design[] = [
   rateLimiter,
   notificationSystem,
+  priceTracker,
   paymentWebhooks,
   stockTrading,
   bookingSystem,
