@@ -6,6 +6,7 @@ export const flashSale: Design = {
   summary:
     'Sell a few thousand units to a million people who all click at the same second: absorb the burst at the edge, admit buyers at a pace the backend can take, decrement stock in memory without overselling, and turn every reservation into a durable order or give it back.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'A sale opens at a set time for a small number of items with limited stock.',
@@ -67,7 +68,7 @@ export const flashSale: Design = {
   highLevel: {
     label: 'Run the first seconds of a sale',
     intro:
-      'Follow one buyer through the rush at the moment a sale opens, from the waiting room to a paid order, and see what keeps stock exact when units are reserved and released. Press play, or step through the stages.',
+      'Follow one buyer through the rush at the moment a sale opens, from the waiting room to a paid order, and see what keeps stock exact when units are reserved and released. The design grows as it needs to: watch the opening rush crush checkout until a waiting room joins, then the counter, the log and the expiry job. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'buyers', title: 'Buyers', detail: 'A million at once', column: 0, row: 'middle' },
       {
@@ -83,32 +84,64 @@ export const flashSale: Design = {
         detail: 'Admits at a fixed rate',
         column: 2,
         row: 'middle',
+        appearsAt: 2,
       },
-      { id: 'checkout', title: 'Checkout API', detail: 'Needs a pass', column: 3, row: 'middle' },
+      {
+        id: 'checkout',
+        title: 'Checkout API',
+        detail: 'Needs a pass',
+        column: 3,
+        row: 'middle',
+        appearsAt: 1,
+      },
       {
         id: 'payments',
         title: 'Payments',
         detail: 'Before the deadline',
         column: 3,
         row: 'bottom',
+        appearsAt: 7,
       },
-      { id: 'expiry', title: 'Hold expiry', detail: 'Returns unpaid units', column: 4, row: 'top' },
+      {
+        id: 'expiry',
+        title: 'Hold expiry',
+        detail: 'Returns unpaid units',
+        column: 4,
+        row: 'top',
+        appearsAt: 8,
+      },
       {
         id: 'counter',
         title: 'Stock counter',
         detail: 'Atomic, in memory',
         column: 4,
         row: 'middle',
+        appearsAt: 4,
       },
-      { id: 'db', title: 'Orders DB', detail: 'Unique per buyer', column: 4, row: 'bottom' },
+      {
+        id: 'db',
+        title: 'Orders DB',
+        detail: 'Unique per buyer',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 5,
+      },
       {
         id: 'stream',
         title: 'Reservation log',
         detail: 'Durable, ordered',
         column: 5,
         row: 'middle',
+        appearsAt: 5,
       },
-      { id: 'writer', title: 'Order writer', detail: 'Idempotent', column: 5, row: 'bottom' },
+      {
+        id: 'writer',
+        title: 'Order writer',
+        detail: 'Idempotent',
+        column: 5,
+        row: 'bottom',
+        appearsAt: 5,
+      },
     ],
     edges: [
       ['buyers', 'edge'],
@@ -131,15 +164,40 @@ export const flashSale: Design = {
           'Rendering the page from origin would melt it minutes before the sale even starts. A static page costs some flexibility, such as showing live stock on it, and in exchange the edge absorbs almost all the refresh traffic at no cost to the backend.',
         nodes: ['buyers', 'edge'],
         travel: [['buyers', 'edge']],
+        short: 'Edge page',
+        metrics: { users: '1M', requestsPerSecond: '500K', p95Latency: '30 ms', errorRate: '0%' },
+        load: { edge: 40 },
+      },
+      {
+        title: 'Everyone hits checkout at once',
+        narration:
+          'At first the page links straight to checkout. When the countdown hits zero, a million buyers and their scripts press buy in the same second. Checkout servers run out of connections, most requests fail, and buyers retry in a loop that only adds load.',
+        tradeoff:
+          'Adding checkout servers would not help much: the demand is a spike of one second, far above any fleet worth paying for, and the winners are whoever retries fastest. The backend needs a steady, fair flow of buyers, not more capacity for the spike.',
+        nodes: ['buyers', 'edge', 'checkout'],
+        travel: [['buyers', 'edge']],
+        short: 'Opening rush',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '1M',
+          p95Latency: '6 s',
+          errorRate: '35%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { edge: 70, checkout: 99 },
+        traffic: [{ edge: ['buyers', 'edge'], kind: 'failed' }],
       },
       {
         title: 'Line up in a waiting room',
         narration:
-          'Buyers who arrive before the start join a waiting room and get a random position at opening time; later arrivals go to the back. The room admits buyers at a fixed rate the checkout can handle.',
+          'A waiting room joins. Buyers who arrive before the start wait in it and get a random position at opening time; later arrivals go to the back. The room admits buyers at a fixed rate the checkout can handle.',
         tradeoff:
           'Letting everyone hit checkout at once and rejecting the overflow rewards whoever retries fastest, which means scripts. A waiting room costs an extra hop and a page that buyers watch, and in exchange the load behind it is flat and the order is fair.',
         nodes: ['edge', 'room'],
         travel: [['edge', 'room']],
+        short: 'Waiting room',
+        metrics: { users: '1M', requestsPerSecond: '500K', p95Latency: '40 ms', errorRate: '0.1%' },
+        load: { edge: 45, room: 50, checkout: 40 },
       },
       {
         title: 'Admit with a signed pass',
@@ -149,6 +207,9 @@ export const flashSale: Design = {
           'A pass that checkout must look up in a shared store would turn the store into a new hot spot. A signed, self-contained pass is checked locally on every checkout server; the cost is that a pass cannot be revoked early, which a short validity makes acceptable.',
         nodes: ['room', 'checkout'],
         travel: [['room', 'checkout', 'pass']],
+        short: 'Signed pass',
+        metrics: { users: '1M', requestsPerSecond: '500K', p95Latency: '40 ms', errorRate: '0.1%' },
+        load: { room: 50, checkout: 45 },
       },
       {
         title: 'Reserve in memory, atomically',
@@ -158,6 +219,9 @@ export const flashSale: Design = {
           'Decrementing a row in the database with a conditional update is correct, but every request queues on the same row lock and the database becomes the bottleneck. An in-memory counter handles orders of magnitude more operations per second, and the cost is that it is not the durable record, so the next step must make it one.',
         nodes: ['checkout', 'counter'],
         travel: [['checkout', 'counter', 'reserve']],
+        short: 'Reserve',
+        metrics: { users: '1M', requestsPerSecond: '500K', p95Latency: '40 ms', errorRate: '0.1%' },
+        load: { checkout: 50, counter: 60 },
       },
       {
         title: 'Log the reservation before answering',
@@ -171,6 +235,9 @@ export const flashSale: Design = {
           ['stream', 'writer'],
           ['writer', 'db'],
         ],
+        short: 'Log first',
+        metrics: { users: '1M', requestsPerSecond: '500K', p95Latency: '45 ms', errorRate: '0.1%' },
+        load: { counter: 60, stream: 45, writer: 35, db: 30 },
       },
       {
         title: 'Sold out stops the line',
@@ -180,6 +247,9 @@ export const flashSale: Design = {
           'Without the flag, a hundred thousand buyers would each walk through checkout just to hear no. Pushing the flag outward costs a small window where a few requests still arrive, and the counter rejects those correctly anyway.',
         nodes: ['counter', 'room', 'edge'],
         travel: [],
+        short: 'Sold out',
+        metrics: { users: '1M', requestsPerSecond: '500K', p95Latency: '30 ms', errorRate: '0.1%' },
+        load: { edge: 50, room: 20, counter: 15 },
       },
       {
         title: 'Pay before the deadline',
@@ -192,6 +262,9 @@ export const flashSale: Design = {
           ['checkout', 'payments'],
           ['payments', 'db', 'confirm'],
         ],
+        short: 'Pay',
+        metrics: { users: '1M', requestsPerSecond: '20K', p95Latency: '300 ms', errorRate: '0.2%' },
+        load: { checkout: 30, payments: 45, db: 35 },
       },
       {
         title: 'Unpaid units go back',
@@ -201,6 +274,9 @@ export const flashSale: Design = {
           'Never releasing makes the sale end "sold out" with unpaid units sitting idle. Releasing needs care: the expire and the payment must race through the same conditional update, so a unit is either paid or returned, never both.',
         nodes: ['expiry', 'counter', 'room'],
         travel: [['expiry', 'counter', 'release']],
+        short: 'Release',
+        metrics: { users: '1M', requestsPerSecond: '20K', p95Latency: '300 ms', errorRate: '0.2%' },
+        load: { expiry: 30, counter: 20, room: 25 },
       },
       {
         title: 'The database has the last word',
@@ -210,6 +286,10 @@ export const flashSale: Design = {
           'Trusting the in-memory counter forever would be simpler, and a bug or failover could then oversell silently. Reconciling against durable records costs a recovery procedure and an audit job, and makes any drift visible and fixable.',
         nodes: ['db', 'counter', 'writer'],
         travel: [['writer', 'db']],
+        short: 'Reconcile',
+        metrics: { users: '1M', requestsPerSecond: '20K', p95Latency: '300 ms', errorRate: '0.2%' },
+        load: { db: 40, counter: 15, writer: 25 },
+        traffic: [{ edge: ['writer', 'db'], kind: 'heavy' }],
       },
     ],
   },
