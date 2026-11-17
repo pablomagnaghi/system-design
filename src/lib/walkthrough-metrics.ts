@@ -3,7 +3,8 @@ import type { MetricKey, StageMetrics, WalkthroughStage } from '../content/types
 export type MetricStatus = 'alert' | 'recovered' | 'normal';
 
 export interface MetricItem {
-  readonly key: MetricKey;
+  /** A fixed metric key, or `custom:<label>` for a labelled one. */
+  readonly key: string;
   readonly label: string;
   readonly value: string;
   readonly status: MetricStatus;
@@ -29,7 +30,7 @@ export function metricItems(
   if (!metrics) return [];
   const alerts = new Set(metrics.alerts);
   const previousAlerts = new Set(previous?.alerts);
-  return METRICS.flatMap(([key, label]) => {
+  const fixed = METRICS.flatMap(([key, label]) => {
     const value = metrics[key];
     if (value === undefined) return [];
     const status: MetricStatus = alerts.has(key)
@@ -39,6 +40,12 @@ export function metricItems(
         : 'normal';
     return [{ key, label, value, status }];
   });
+  const custom = (metrics.custom ?? []).map((metric): MetricItem => {
+    const wasAlert = previous?.custom?.some((p) => p.label === metric.label && p.alert) ?? false;
+    const status: MetricStatus = metric.alert ? 'alert' : wasAlert ? 'recovered' : 'normal';
+    return { key: `custom:${metric.label}`, label: metric.label, value: metric.value, status };
+  });
+  return [...fixed, ...custom];
 }
 
 export type LoadLevel = 'ok' | 'busy' | 'hot';

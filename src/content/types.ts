@@ -32,6 +32,15 @@ export interface StageMetrics {
   readonly healthy?: string;
   /** Metrics in trouble at this stage; the UI flags them. Each must be set above. */
   readonly alerts?: readonly MetricKey[];
+  /** Metrics with their own label, for numbers the fixed keys cannot hold (p99, node count). */
+  readonly custom?: readonly CustomMetric[];
+}
+
+export interface CustomMetric {
+  /** Short label, at most 24 characters, unique within a stage. */
+  readonly label: string;
+  readonly value: string;
+  readonly alert?: boolean;
 }
 
 /** A connector between two nodes, by node id, with an optional short label drawn on it. */
