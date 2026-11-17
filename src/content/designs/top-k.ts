@@ -224,7 +224,7 @@ export const topK: Design = {
       {
         title: 'Keep a local top list',
         narration:
-          'Each counter keeps a min-heap of its own top items for each window and sends that partial list, not every count, to the merger every few seconds.',
+          'Every few seconds each counter recomputes the top items of each window from its per-item window counts and sends that partial list, not every count, to the merger. Recomputing matters: as old buckets leave a sliding window, counts go down, and a heap that only ever saw increases would miss an item that overtakes.',
         tradeoff:
           'Sending only partial top lists cuts traffic by orders of magnitude. It is exact for the global top K because items are partitioned: an item that is in the global top must be in the top of its own partition.',
         nodes: ['counters', 'merger'],
