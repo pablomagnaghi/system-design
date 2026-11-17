@@ -6,6 +6,7 @@ export const newsFeed: Design = {
   summary:
     'Show every user the latest posts from the accounts they follow in a fraction of a second, by precomputing feeds when posts are written, without letting an account with millions of followers turn one post into millions of writes.',
   difficulty: 'Medium',
+  minutes: 9,
   requirements: {
     functional: [
       'Publish a post with text and links to media.',
@@ -61,29 +62,59 @@ export const newsFeed: Design = {
   highLevel: {
     label: 'Publish a post, then read a feed',
     intro:
-      'Follow a post from the author to the feeds of their followers, then follow a reader loading the first page of their feed. Press play, or step through the stages.',
+      'Follow a post from the author to the feeds of their followers, then follow a reader loading the first page of their feed. The design grows one piece at a time, and a post from a huge account shows why fan-out has a limit. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'client', title: 'Clients', detail: 'Apps and web', column: 0, row: 'middle' },
       { id: 'api', title: 'API gateway', detail: 'Auth, routing', column: 1, row: 'middle' },
       { id: 'posts', title: 'Post service', detail: 'Writes posts', column: 2, row: 'top' },
       { id: 'postStore', title: 'Post store', detail: 'By author', column: 3, row: 'top' },
-      { id: 'queue', title: 'Fan-out queue', detail: 'Post events', column: 3, row: 'middle' },
+      {
+        id: 'queue',
+        title: 'Fan-out queue',
+        detail: 'Post events',
+        column: 3,
+        row: 'middle',
+        appearsAt: 1,
+      },
       {
         id: 'fanout',
         title: 'Fan-out workers',
         detail: 'Write feed entries',
         column: 4,
         row: 'middle',
+        appearsAt: 2,
       },
-      { id: 'graph', title: 'Follow graph', detail: 'Followers by user', column: 4, row: 'top' },
-      { id: 'feedSvc', title: 'Feed service', detail: 'Builds pages', column: 2, row: 'bottom' },
-      { id: 'feeds', title: 'Feed cache', detail: 'Post IDs per user', column: 3, row: 'bottom' },
+      {
+        id: 'graph',
+        title: 'Follow graph',
+        detail: 'Followers by user',
+        column: 4,
+        row: 'top',
+        appearsAt: 2,
+      },
+      {
+        id: 'feedSvc',
+        title: 'Feed service',
+        detail: 'Builds pages',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 6,
+      },
+      {
+        id: 'feeds',
+        title: 'Feed cache',
+        detail: 'Post IDs per user',
+        column: 3,
+        row: 'bottom',
+        appearsAt: 3,
+      },
       {
         id: 'postCache',
         title: 'Post cache',
         detail: 'Bodies, authors',
         column: 1,
         row: 'bottom',
+        appearsAt: 7,
       },
     ],
     edges: [
@@ -111,6 +142,14 @@ export const newsFeed: Design = {
           ['api', 'posts', 'publish'],
           ['posts', 'postStore'],
         ],
+        short: 'Store post',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '80 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 30, posts: 30, postStore: 25 },
       },
       {
         title: 'Hand off the fan-out',
@@ -120,6 +159,14 @@ export const newsFeed: Design = {
           'The author never waits for thousands of feed writes, and a spike of posts just makes the queue longer. The cost is that followers see the post seconds later instead of instantly, which suits a feed.',
         nodes: ['posts', 'queue'],
         travel: [['posts', 'queue', 'event']],
+        short: 'Queue',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '40 ms',
+          errorRate: '0.1%',
+        },
+        load: { posts: 30, queue: 20 },
       },
       {
         title: 'Page through the followers',
@@ -132,6 +179,9 @@ export const newsFeed: Design = {
           ['queue', 'fanout'],
           ['fanout', 'graph', 'followers'],
         ],
+        short: 'Followers',
+        metrics: { users: '50M', requestsPerSecond: '200K', p95Latency: '2 s', errorRate: '0.1%' },
+        load: { queue: 25, fanout: 35, graph: 30 },
       },
       {
         title: 'Prepend the post to each feed',
@@ -141,6 +191,34 @@ export const newsFeed: Design = {
           'Fan-out on write turns every feed read into a single list lookup, at the cost of one write per follower per post. Storing only IDs keeps each feed to a few kilobytes; the cap bounds memory, and older pages fall back to a slower path.',
         nodes: ['fanout', 'feeds'],
         travel: [['fanout', 'feeds', 'prepend']],
+        short: 'Prepend',
+        metrics: { users: '50M', requestsPerSecond: '200K', p95Latency: '2 s', errorRate: '0.1%' },
+        load: { fanout: 40, feeds: 35 },
+      },
+      {
+        title: 'A huge account posts',
+        narration:
+          'An account with thirty million followers posts. Fan-out on write turns that one post into thirty million feed writes: the workers spend minutes on it, the queue backs up behind it, and posts from everyone else reach their followers minutes late.',
+        tradeoff:
+          'More workers shorten the burst but pay for capacity that sits idle between such posts, and the feed cache still takes the whole write storm. Much of the work is wasted too, since most of those followers will not open the app before the post is old.',
+        nodes: ['queue', 'fanout', 'graph', 'feeds'],
+        travel: [
+          ['queue', 'fanout'],
+          ['fanout', 'feeds', 'prepend'],
+        ],
+        short: 'Huge account',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '6 min',
+          errorRate: '0.1%',
+          alerts: ['p95Latency'],
+        },
+        load: { queue: 95, fanout: 98, graph: 60, feeds: 85 },
+        traffic: [
+          { edge: ['queue', 'fanout'], kind: 'heavy' },
+          { edge: ['fanout', 'feeds'], kind: 'heavy' },
+        ],
       },
       {
         title: 'Skip the very large accounts',
@@ -150,6 +228,9 @@ export const newsFeed: Design = {
           'One post from an account with tens of millions of followers would mean tens of millions of writes, delaying everyone else’s fan-out. Skipping it moves that cost to read time, where it is paid only by followers who actually open the app.',
         nodes: ['fanout', 'graph'],
         travel: [],
+        short: 'Skip large',
+        metrics: { users: '50M', requestsPerSecond: '200K', p95Latency: '2 s', errorRate: '0.1%' },
+        load: { queue: 25, fanout: 35, graph: 30, feeds: 30 },
       },
       {
         title: 'Read the precomputed feed',
@@ -163,6 +244,14 @@ export const newsFeed: Design = {
           ['api', 'feedSvc', 'read'],
           ['feedSvc', 'feeds'],
         ],
+        short: 'Read feed',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '30 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 35, feedSvc: 30, feeds: 35 },
       },
       {
         title: 'Merge in posts from large accounts',
@@ -172,6 +261,14 @@ export const newsFeed: Design = {
           'This hybrid keeps writes bounded and still shows posts from huge accounts within seconds. It makes reads a little more complex, but a reader follows only a handful of such accounts, and their recent posts are among the most cached objects in the system.',
         nodes: ['feedSvc', 'postCache'],
         travel: [['feedSvc', 'postCache', 'hydrate']],
+        short: 'Merge large',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '50 ms',
+          errorRate: '0.1%',
+        },
+        load: { feedSvc: 40, postCache: 45 },
       },
       {
         title: 'Hydrate the page',
@@ -181,6 +278,14 @@ export const newsFeed: Design = {
           'Keeping IDs in feeds and content in one cache means an edit or deletion shows up everywhere at once. The cost is a second round trip per page, kept small by batching and a very high hit rate on recent posts.',
         nodes: ['feedSvc', 'postCache', 'api', 'client'],
         travel: [['feedSvc', 'postCache', 'hydrate']],
+        short: 'Hydrate',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.1%',
+        },
+        load: { feedSvc: 40, postCache: 50, api: 35 },
       },
       {
         title: 'Scroll with a cursor',
@@ -190,6 +295,14 @@ export const newsFeed: Design = {
           'Offsets shift when new posts are prepended, so users would see duplicates. A cursor is stable, at the cost of not allowing a jump to an arbitrary page, which a feed does not need. Past the cached window, the service builds older pages by pulling from followed authors.',
         nodes: ['client', 'feedSvc', 'feeds'],
         travel: [['feedSvc', 'feeds']],
+        short: 'Cursor',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.1%',
+        },
+        load: { feedSvc: 40, feeds: 35 },
       },
     ],
   },
