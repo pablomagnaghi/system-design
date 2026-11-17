@@ -5,6 +5,7 @@ export const paymentWebhooks: Design = {
   title: 'Payment webhook processor',
   summary:
     'Turn payment provider webhooks into correct order and ledger updates: never lose an event, never apply one twice, and survive events that arrive late, out of order or not at all.',
+  minutes: 10,
   difficulty: 'Hard',
   requirements: {
     functional: [
@@ -56,7 +57,7 @@ export const paymentWebhooks: Design = {
   highLevel: {
     label: 'Run a payment event through the processor',
     intro:
-      'Follow one "payment succeeded" event from the provider to the ledger. Press play, or step through the stages to see what happens and what each choice costs.',
+      'Follow one "payment succeeded" event from the provider to the ledger. Watch inline processing time out under a traffic spike, then see the inbox, the queue, the processor, dead letters and reconciliation join the design as it grows. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       {
         id: 'provider',
@@ -72,15 +73,37 @@ export const paymentWebhooks: Design = {
         column: 1,
         row: 'middle',
       },
-      { id: 'inbox', title: 'Inbox table', detail: 'Unique event id', column: 2, row: 'middle' },
-      { id: 'queue', title: 'Work queue', detail: 'Retries, backoff', column: 3, row: 'middle' },
-      { id: 'dlq', title: 'Dead letters', detail: 'Alert + replay', column: 4, row: 'top' },
+      {
+        id: 'inbox',
+        title: 'Inbox table',
+        detail: 'Unique event id',
+        column: 2,
+        row: 'middle',
+        appearsAt: 3,
+      },
+      {
+        id: 'queue',
+        title: 'Work queue',
+        detail: 'Retries, backoff',
+        column: 3,
+        row: 'middle',
+        appearsAt: 5,
+      },
+      {
+        id: 'dlq',
+        title: 'Dead letters',
+        detail: 'Alert + replay',
+        column: 4,
+        row: 'top',
+        appearsAt: 8,
+      },
       {
         id: 'processor',
         title: 'Processor',
         detail: 'Idempotent handler',
         column: 4,
         row: 'middle',
+        appearsAt: 6,
       },
       {
         id: 'recon',
@@ -88,8 +111,15 @@ export const paymentWebhooks: Design = {
         detail: 'Daily vs provider',
         column: 4,
         row: 'bottom',
+        appearsAt: 9,
       },
-      { id: 'db', title: 'Payments + ledger', detail: 'One transaction', column: 5, row: 'middle' },
+      {
+        id: 'db',
+        title: 'Payments + ledger',
+        detail: 'One transaction',
+        column: 5,
+        row: 'middle',
+      },
     ],
     edges: [
       ['provider', 'endpoint'],
@@ -109,6 +139,9 @@ export const paymentWebhooks: Design = {
           'Webhooks give near real-time updates without polling. The price is that duplicates, reordering and gaps are normal, so the rest of the design exists to make them harmless.',
         nodes: ['provider', 'endpoint'],
         travel: [['provider', 'endpoint']],
+        short: 'Push event',
+        metrics: { users: '100K', requestsPerSecond: '50', p95Latency: '400 ms', errorRate: '0%' },
+        load: { endpoint: 15, db: 10 },
       },
       {
         title: 'Verify the signature',
@@ -118,15 +151,40 @@ export const paymentWebhooks: Design = {
           'A tight timestamp tolerance blocks replays but can reject real events when clocks drift, so use the window the provider recommends. Supporting two secrets at once lets the secret rotate without downtime.',
         nodes: ['endpoint'],
         travel: [],
+        short: 'Verify',
+        metrics: { users: '100K', requestsPerSecond: '50', p95Latency: '400 ms', errorRate: '0%' },
+        load: { endpoint: 18 },
+      },
+      {
+        title: 'Work inside the request times out',
+        narration:
+          'At first the endpoint does everything before answering: it updates the payment and the ledger and sends the receipt. A busy sales day multiplies events, handlers slow down and responses miss the provider timeout. The provider retries, and every retry adds more load to an endpoint that is already behind.',
+        tradeoff:
+          'Inline processing is the simplest design and works at low volume. Under a spike it turns slowness into failures, and failures into retries, so load feeds on itself. The fix is to make the request do as little as possible and move the work behind it.',
+        nodes: ['provider', 'endpoint', 'db'],
+        travel: [['provider', 'endpoint']],
+        short: 'Timeouts',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '2K',
+          p95Latency: '12 s',
+          errorRate: '8%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { endpoint: 98, db: 75 },
+        traffic: [{ edge: ['provider', 'endpoint'], kind: 'failed' }],
       },
       {
         title: 'Store, then answer 2xx',
         narration:
-          'The raw event goes into an inbox table and the endpoint answers 2xx right away. No business logic runs inside the request.',
+          'An inbox table joins the design. The raw event goes into it and the endpoint answers 2xx right away. No business logic runs inside the request.',
         tradeoff:
           'Doing the work inside the request is simpler, but a slow handler misses the provider timeout and triggers retries that pile up. Acknowledging first keeps the endpoint fast; in exchange we own retries, so the inbox must be durable.',
         nodes: ['endpoint', 'inbox'],
         travel: [['endpoint', 'inbox']],
+        short: 'Store, 2xx',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { endpoint: 30, inbox: 35 },
       },
       {
         title: 'Duplicates stop at the door',
@@ -136,6 +194,9 @@ export const paymentWebhooks: Design = {
           'Deduplicating at insert is exact and cheap, as long as event ids are kept longer than the provider retry window. Keeping them for weeks costs little and also gives a full audit trail.',
         nodes: ['inbox'],
         travel: [],
+        short: 'Dedupe',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { inbox: 35 },
       },
       {
         title: 'Hand off to a work queue',
@@ -145,6 +206,9 @@ export const paymentWebhooks: Design = {
           'A managed queue scales and retries for us. At low volume, a worker polling the inbox table is simpler and has one less moving part, and it is easy to move to a queue later.',
         nodes: ['inbox', 'queue'],
         travel: [['inbox', 'queue']],
+        short: 'Work queue',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { inbox: 30, queue: 30 },
       },
       {
         title: 'Apply the event idempotently',
@@ -154,6 +218,9 @@ export const paymentWebhooks: Design = {
           'Fetching the latest object costs an API call per event, and in return arrival order stops mattering: a late "succeeded" after a "refunded" cannot undo the refund.',
         nodes: ['queue', 'processor'],
         travel: [['queue', 'processor']],
+        short: 'Apply event',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { queue: 30, processor: 45 },
       },
       {
         title: 'One transaction for the money',
@@ -163,6 +230,9 @@ export const paymentWebhooks: Design = {
           'One transaction means the ledger can never disagree with the payment state. Moving side effects to an outbox adds a table and a worker, and keeps a crash from sending a receipt for a payment that was rolled back.',
         nodes: ['processor', 'db'],
         travel: [['processor', 'db']],
+        short: 'Transaction',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { processor: 45, db: 40 },
       },
       {
         title: 'Failures go to dead letters',
@@ -172,6 +242,10 @@ export const paymentWebhooks: Design = {
           'Retrying forever hides bugs and blocks nothing visible; giving up silently loses money. A dead-letter queue with an alert makes every stuck event someone’s job, and replay is safe because handlers are idempotent.',
         nodes: ['queue', 'dlq'],
         travel: [['queue', 'dlq']],
+        short: 'Dead letters',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0.01%' },
+        load: { queue: 30, processor: 45, dlq: 10 },
+        traffic: [{ edge: ['queue', 'processor'], kind: 'failed' }],
       },
       {
         title: 'Reconcile every day',
@@ -181,6 +255,10 @@ export const paymentWebhooks: Design = {
           'Reconciliation costs API calls and a job to maintain. Webhooks alone cannot prove that nothing was missed; comparing against the source of truth can.',
         nodes: ['recon', 'db'],
         travel: [['recon', 'db']],
+        short: 'Reconcile',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { recon: 70, db: 50 },
+        traffic: [{ edge: ['recon', 'db'], kind: 'heavy' }],
       },
     ],
   },
