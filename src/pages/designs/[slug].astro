@@ -34,6 +34,10 @@ const others = designs.filter((other) => other.slug !== design.slug);
       <a href="#data-flow">4 · Data flow</a>
       <a href="#high-level">5 · High-level design</a>
       <a href="#deep-dives">6 · Deep dives</a>
+      {design.guarantees && <a href="#guarantees">Guarantees</a>}
+      {design.failures && design.failures.length > 0 && <a href="#failures">Failures</a>}
+      {design.capacity && <a href="#capacity">Capacity</a>}
+      {design.evolution && <a href="#evolution">Evolution</a>}
     </nav>
 
     <section id="requirements">
@@ -148,6 +152,131 @@ const others = designs.filter((other) => other.slug !== design.slug);
         </div>
       ))}
     </section>
+
+    {design.guarantees && (
+      <section id="guarantees">
+        <h2>Guarantees</h2>
+        <p class="muted">What this design promises, what that depends on, and what it does not.</p>
+        <dl class="pairs">
+          {design.guarantees.provides.map((item) => (
+            <div class="card">
+              <dt>{item.property}</dt>
+              <dd>{item.promise}</dd>
+            </div>
+          ))}
+        </dl>
+        <div class="columns">
+          <div>
+            <h3>Assumes</h3>
+            <ul>
+              {design.guarantees.assumes.map((item) => (
+                <li>{item}</li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h3>Does not guarantee</h3>
+            <ul>
+              {design.guarantees.doesNotGuarantee.map((item) => (
+                <li>{item}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
+    )}
+
+    {design.failures && design.failures.length > 0 && (
+      <section id="failures">
+        <h2>Failure scenarios and recovery</h2>
+        <p class="muted">What happens off the happy path, how it is noticed and how it heals.</p>
+        {design.failures.map((failure) => (
+          <div class="card failure">
+            <h3>{failure.scenario}</h3>
+            <dl>
+              <dt>Impact</dt>
+              <dd>{failure.impact}</dd>
+              <dt>Detection</dt>
+              <dd>{failure.detection}</dd>
+              <dt>Recovery</dt>
+              <dd>{failure.recovery}</dd>
+            </dl>
+          </div>
+        ))}
+      </section>
+    )}
+
+    {design.capacity && (
+      <section id="capacity">
+        <h2>Capacity planning</h2>
+        <p class="muted">
+          Back-of-the-envelope numbers. They are illustrative orders of magnitude, used to justify
+          decisions, not measurements.
+        </p>
+        <h3>Assumptions</h3>
+        <ul>
+          {design.capacity.assumptions.map((item) => (
+            <li>{item}</li>
+          ))}
+        </ul>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Estimate</th>
+                <th>Value</th>
+                <th>How</th>
+              </tr>
+            </thead>
+            <tbody>
+              {design.capacity.estimates.map((estimate) => (
+                <tr>
+                  <th>{estimate.label}</th>
+                  <td class="value">{estimate.value}</td>
+                  <td>{estimate.math}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <h3>What the numbers force</h3>
+        <ul>
+          {design.capacity.implications.map((item) => (
+            <li>{item}</li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    {design.evolution && (
+      <section id="evolution">
+        <h2>How it evolves</h2>
+        <dl class="evolution">
+          <dt>Start simple</dt>
+          <dd>{design.evolution.mvp}</dd>
+          <dt>First bottleneck</dt>
+          <dd>{design.evolution.firstBottleneck}</dd>
+        </dl>
+        <div class="columns">
+          <div>
+            <h3>At 10x and 100x</h3>
+            <ul>
+              {design.evolution.atScale.map((item) => (
+                <li>{item}</li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h3>Avoided on purpose</h3>
+            <ul>
+              {design.evolution.avoided.map((item) => (
+                <li>{item}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
+    )}
 
     <section class="wrap-up">
       <h2>In one sentence</h2>
@@ -317,6 +446,44 @@ const others = designs.filter((other) => other.slug !== design.slug);
     border-left: 3px solid var(--accent);
     background: var(--accent-soft);
     border-radius: 0 8px 8px 0;
+  }
+  .pairs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .pairs dt,
+  .failure dt,
+  .evolution dt {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  .pairs dd,
+  .failure dd,
+  .evolution dd {
+    margin: 4px 0 0;
+  }
+  .failure {
+    margin-bottom: 12px;
+  }
+  .failure h3 {
+    margin: 0 0 8px;
+    font-size: 1.05rem;
+  }
+  .failure dl {
+    margin: 0;
+  }
+  .failure dd,
+  .evolution dd {
+    margin-bottom: 10px;
+  }
+  .value {
+    font-family: var(--mono);
+    white-space: nowrap;
   }
   .wrap-up p {
     font-size: 1.1rem;
