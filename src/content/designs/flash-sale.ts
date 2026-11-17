@@ -254,7 +254,7 @@ export const flashSale: Design = {
       {
         title: 'Pay before the deadline',
         narration:
-          'The buyer pays within a few minutes. On success the order moves from reserved to paid with a conditional update that only applies to a reservation that has not expired.',
+          'The buyer pays within a few minutes. The payment is authorized first, then the order moves from reserved to paid with a conditional update that only applies to a reservation that has not expired, and only then is the charge captured. If the reservation had already expired, the authorization is voided.',
         tradeoff:
           'Charging inside the reserve call would hold a scarce unit hostage to a slow payment provider during the busiest second. Splitting reserve and pay keeps the hot path short; the cost is a deadline to enforce and units temporarily held by people who may never pay.',
         nodes: ['checkout', 'payments', 'db'],
@@ -271,7 +271,7 @@ export const flashSale: Design = {
         narration:
           'A job finds reservations past their deadline, marks them expired in the database and increments the counter again. The waiting room then admits a few more buyers for the returned units.',
         tradeoff:
-          'Never releasing makes the sale end "sold out" with unpaid units sitting idle. Releasing needs care: the expire and the payment must race through the same conditional update, so a unit is either paid or returned, never both.',
+          'Never releasing makes the sale end "sold out" with unpaid units sitting idle. Releasing needs care: the expire and the payment must race through the same conditional update, so a unit is either paid or returned, never both. Because the charge is only captured after that update succeeds, a buyer who loses the race is not charged.',
         nodes: ['expiry', 'counter', 'room'],
         travel: [['expiry', 'counter', 'release']],
         short: 'Release',
@@ -281,7 +281,7 @@ export const flashSale: Design = {
       {
         title: 'The database has the last word',
         narration:
-          'The orders database is the source of truth. If the counter is lost, it is rebuilt as stock minus active reservations. After the sale, paid orders are reconciled against stock and the per-buyer unique key.',
+          'The orders database is the source of truth. If the counter is lost, the sale pauses, the writer drains the reservation log into the database, and only then is the counter rebuilt as stock minus active reservations. Rebuilding before the log is drained would miss reservations and oversell. After the sale, paid orders are reconciled against stock and the per-buyer unique key.',
         tradeoff:
           'Trusting the in-memory counter forever would be simpler, and a bug or failover could then oversell silently. Reconciling against durable records costs a recovery procedure and an audit job, and makes any drift visible and fixable.',
         nodes: ['db', 'counter', 'writer'],
