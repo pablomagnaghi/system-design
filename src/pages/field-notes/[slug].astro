@@ -1,0 +1,140 @@
+---
+import type { GetStaticPaths } from 'astro';
+import { designs, fieldNotes, type FieldNote } from '../../content';
+import Walkthrough from '../../components/Walkthrough';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+export const getStaticPaths = (() =>
+  fieldNotes.map((note) => ({
+    params: { slug: note.slug },
+    props: { note },
+  }))) satisfies GetStaticPaths;
+
+interface Props {
+  note: FieldNote;
+}
+
+const { note } = Astro.props;
+const related = designs.filter((design) => note.related?.includes(design.slug));
+const others = fieldNotes.filter((other) => other.slug !== note.slug);
+---
+
+<BaseLayout title={`${note.company}: ${note.title}`} description={note.summary}>
+  <article class="container">
+    <a href="/field-notes/" class="back">
+      ← All field notes
+    </a>
+    <p class="eyebrow">
+      Field note · {note.company} · {note.source.year}
+      {note.minutes ? ` · ${note.minutes} min` : ''}
+    </p>
+    <h1>{note.title}</h1>
+    <p class="summary">{note.summary}</p>
+
+    <section>
+      <h2>The situation</h2>
+      {note.context.map((paragraph) => (
+        <p>{paragraph}</p>
+      ))}
+    </section>
+
+    <section>
+      <h2>The change, step by step</h2>
+      <Walkthrough client:visible walkthrough={note.walkthrough} />
+    </section>
+
+    <section>
+      <h2>What it cost</h2>
+      <ul>
+        {note.tradeoffs.map((item) => (
+          <li>{item}</li>
+        ))}
+      </ul>
+    </section>
+
+    <section>
+      <h2>What to reuse in an interview</h2>
+      <ul>
+        {note.takeaways.map((item) => (
+          <li>{item}</li>
+        ))}
+      </ul>
+      {related.length > 0 && (
+        <p class="related">
+          Same ideas in:{' '}
+          {related.map((design, index) => (
+            <>
+              {index > 0 && ', '}
+              <a href={`/designs/${design.slug}/`}>{design.title}</a>
+            </>
+          ))}
+        </p>
+      )}
+    </section>
+
+    <p class="source">
+      Retold in my own words from {note.company}'s public engineering post,{' '}
+      <a href={note.source.url} rel="noopener" target="_blank">
+        {note.source.title}
+      </a>
+      ({note.source.year}). Numbers come from that post.
+    </p>
+
+    {others.length > 0 && (
+      <nav class="next" aria-label="Other field notes">
+        {others.map((other) => (
+          <a href={`/field-notes/${other.slug}/`}>
+            {other.company}: {other.title} →
+          </a>
+        ))}
+      </nav>
+    )}
+  </article>
+</BaseLayout>
+
+<style>
+  article {
+    padding-top: 48px;
+    padding-bottom: 80px;
+    max-width: 960px;
+  }
+  .back {
+    display: inline-block;
+    margin-bottom: 24px;
+  }
+  h1 {
+    font-size: clamp(2rem, 4.5vw, 2.8rem);
+    margin: 0 0 16px;
+  }
+  .summary {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    margin: 0 0 24px;
+  }
+  h2 {
+    margin: 48px 0 16px;
+    font-size: 1.5rem;
+  }
+  li {
+    margin-bottom: 8px;
+  }
+  .related {
+    color: var(--text-muted);
+  }
+  .source {
+    margin-top: 48px;
+    padding: 12px 16px;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 8px 8px 0;
+    font-size: 0.95rem;
+  }
+  .next {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+</style>
