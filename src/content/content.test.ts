@@ -53,4 +53,45 @@ describe('designs', () => {
       }
     }
   });
+
+  // A design can grow stage by stage: nothing may light up, carry load or carry traffic before
+  // its node has appeared.
+  it('only use nodes that have already appeared in each stage', () => {
+    for (const { highLevel } of designs) {
+      const appearsAt = new Map(highLevel.nodes.map((node) => [node.id, node.appearsAt ?? 0]));
+      const edgeKeys = new Set(highLevel.edges.map(([from, to]) => `${from}>${to}`));
+      for (const node of highLevel.nodes) {
+        expect(node.appearsAt ?? 0).toBeGreaterThanOrEqual(0);
+        expect(node.appearsAt ?? 0).toBeLessThan(highLevel.stages.length);
+      }
+      highLevel.stages.forEach((stage, index) => {
+        const visible = (id: string) => (appearsAt.get(id) ?? Infinity) <= index;
+        for (const id of stage.nodes) expect(visible(id), `${id} at stage ${index}`).toBe(true);
+        for (const [from, to] of stage.travel) expect(visible(from) && visible(to)).toBe(true);
+        for (const { edge } of stage.traffic ?? []) {
+          expect(edgeKeys).toContain(`${edge[0]}>${edge[1]}`);
+          expect(visible(edge[0]) && visible(edge[1])).toBe(true);
+        }
+        for (const [id, value] of Object.entries(stage.load ?? {})) {
+          expect(visible(id), `load on ${id} at stage ${index}`).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(100);
+        }
+      });
+    }
+  });
+
+  it('keep stage metrics and timeline labels consistent', () => {
+    for (const design of designs) {
+      if (design.minutes !== undefined) expect(design.minutes).toBeGreaterThan(0);
+      for (const stage of design.highLevel.stages) {
+        if (stage.short !== undefined) {
+          expect(stage.short.length).toBeGreaterThan(0);
+          expect(stage.short.length).toBeLessThanOrEqual(16);
+        }
+        const metrics = stage.metrics;
+        for (const key of metrics?.alerts ?? []) expect(metrics?.[key]).toBeDefined();
+      }
+    }
+  });
 });
