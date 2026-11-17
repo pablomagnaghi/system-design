@@ -1,0 +1,102 @@
+---
+import { fieldNotes } from '../../content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="Field notes"
+  description="Real cases retold from companies' own engineering posts: the problem, the change, what it cost and what to reuse."
+>
+  <section class="container intro">
+    <p class="eyebrow">Field notes</p>
+    <h1>How real teams fixed real bottlenecks.</h1>
+    <p class="lead">
+      Each note retells one change from a company's own public engineering post, as an animated
+      problem → fix walkthrough: what hurt, what they built, what it cost, and the pattern worth
+      reusing in an interview. Every note links its source.
+    </p>
+  </section>
+
+  <section class="container list">
+    {fieldNotes.length > 0 ? (
+      <div class="cards">
+        {fieldNotes.map((note) => (
+          <a class="card note" href={`/field-notes/${note.slug}/`}>
+            <span class="badge">
+              {note.company} · {note.source.year}
+            </span>
+            <h2>{note.title}</h2>
+            <p class="muted">{note.summary}</p>
+            <span class="cta">
+              {note.walkthrough.stages.length} steps
+              {note.minutes ? ` · ${note.minutes} min` : ''} →
+            </span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p class="muted">The first notes are on their way.</p>
+    )}
+  </section>
+</BaseLayout>
+
+<style>
+  .intro {
+    padding-top: 72px;
+    padding-bottom: 32px;
+  }
+  h1 {
+    font-size: clamp(2rem, 5vw, 3.2rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 20px;
+    max-width: 18ch;
+  }
+  .lead {
+    max-width: 680px;
+    font-size: 1.1rem;
+    color: var(--text-muted);
+    margin: 0;
+  }
+  .list {
+    padding-bottom: 80px;
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+    gap: 20px;
+  }
+  .note {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    color: var(--text);
+  }
+  .note:hover {
+    text-decoration: none;
+    border-color: var(--accent);
+  }
+  .note h2 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+  .note p {
+    margin: 0;
+  }
+  .badge {
+    align-self: flex-start;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .cta {
+    margin-top: auto;
+    font-weight: 600;
+    color: var(--accent);
+  }
+</style>
