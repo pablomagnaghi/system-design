@@ -6,6 +6,59 @@
   overflow: hidden;
 }
 
+/* Metrics bar: one card per metric; alerts in red, a metric the stage just fixed in green. */
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 16px 16px 0;
+}
+
+.metrics > div {
+  min-width: 128px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: var(--bg);
+  transition:
+    border-color 300ms ease,
+    color 300ms ease;
+}
+
+.metrics dt {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.metrics dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics .alert {
+  border-left-color: var(--danger);
+}
+
+.metrics .alert dd {
+  color: var(--danger);
+}
+
+.metrics .recovered {
+  border-left-color: var(--success);
+}
+
+.metrics .recovered dd {
+  color: var(--success);
+}
+
 /* Below ~900px the canvas scrolls sideways instead of shrinking text to nothing. */
 .scroller {
   overflow-x: auto;
@@ -117,6 +170,53 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* A saturated node turns red, so the bottleneck is obvious before the narration says it. */
+.node.hot {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.load {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.loadTrack {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.loadFill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 500ms ease;
+}
+
+.loadFill.ok {
+  background: var(--success);
+}
+
+.loadFill.busy {
+  background: color-mix(in srgb, var(--success) 35%, var(--danger));
+}
+
+.loadFill.hot {
+  background: var(--danger);
+}
+
+.node .loadValue {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .dot {
   position: absolute;
   width: 12px;
@@ -191,6 +291,91 @@
   font-weight: 700;
 }
 
+/* Stage timeline with names, shown when the stages define a short label. */
+.timeline {
+  display: flex;
+  gap: 4px;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  overflow-x: auto;
+}
+
+.timeline li {
+  flex: 1 0 72px;
+  position: relative;
+}
+
+/* The line that joins one step to the next. */
+.timeline li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 15px;
+  left: calc(50% + 16px);
+  right: calc(-50% + 12px);
+  height: 2px;
+  background: var(--border);
+}
+
+.timeline li.stepDone::after {
+  background: var(--text-muted);
+}
+
+.timeline button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.timeline button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.stepNumber {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.stepLabel {
+  font-size: 0.74rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.timeline .stepDone .stepNumber {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.timeline .stepCurrent .stepNumber {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.timeline .stepCurrent .stepLabel {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .narration {
   min-height: 12em;
   margin-top: 12px;
@@ -224,7 +409,9 @@
     stroke-dasharray: none;
   }
   .node,
-  .edge {
+  .edge,
+  .metrics > div,
+  .loadFill {
     transition: none;
   }
 }
