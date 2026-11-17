@@ -22,6 +22,18 @@ Live at https://systems.pablomagnaghi.com. Read this file before doing anything.
 - Numbers are illustrative orders of magnitude, never measured results.
 - English only, plain and concise. No em dashes in prose.
 
+### Field notes (`src/content/field-notes/**`)
+
+Field notes retell how a real company solved a real problem, based on that company's own public
+engineering post. They are the one place where a company and its system may be named, because the
+company published it. The rules above still apply, plus:
+
+- Base each note only on the company's own public post or talk, and link it in `source`.
+- Write it in your own words. Never copy text, diagrams or examples from the post, or from any
+  course or guide that covers the same case.
+- Numbers come from the post itself, and the note says so. Do not invent or round them up.
+- Never name Pablo's employers or clients, here or anywhere else.
+
 ## Ownership (one agent per area, no overlapping edits)
 
 | Agent           | Owns                                                                                              |
