@@ -6,6 +6,7 @@ export const topK: Design = {
   summary:
     'Count billions of views a day and answer "what are the top 100 items right now, today, this week?" in milliseconds, accepting a little approximation in exchange for speed and low cost.',
   difficulty: 'Hard',
+  minutes: 9,
   requirements: {
     functional: [
       'Record a view (or like, or play) event for an item.',
@@ -58,7 +59,7 @@ export const topK: Design = {
   highLevel: {
     label: 'Count a view and serve the ranking',
     intro:
-      'Follow one view event from the client until it shows up in the trending list, and see how the list is served without scanning any counts. Press play, or step through the stages.',
+      'Start with one view event, watch a viral item overwhelm a single counter row, and see the log, the stream counters, the merger, the snapshot cache and the batch path join as the design grows, until the trending list is served without scanning any counts. Numbers are illustrative. Press play, or step through the stages.',
     lanes: { top: 'Write path', bottom: 'Read and batch path' },
     nodes: [
       { id: 'clients', title: 'Clients', detail: 'Send view events', column: 0, row: 'middle' },
@@ -69,25 +70,62 @@ export const topK: Design = {
         column: 1,
         row: 'middle',
       },
-      { id: 'log', title: 'Event log', detail: 'Partitioned by item', column: 2, row: 'middle' },
+      {
+        id: 'log',
+        title: 'Event log',
+        detail: 'Partitioned by item',
+        column: 2,
+        row: 'middle',
+        appearsAt: 2,
+      },
       {
         id: 'counters',
         title: 'Stream counters',
         detail: 'Per-minute counts',
         column: 3,
         row: 'middle',
+        appearsAt: 3,
       },
-      { id: 'merger', title: 'Top-K merger', detail: 'Combine partials', column: 4, row: 'middle' },
+      {
+        id: 'merger',
+        title: 'Top-K merger',
+        detail: 'Combine partials',
+        column: 4,
+        row: 'middle',
+        appearsAt: 5,
+      },
       {
         id: 'cache',
         title: 'Snapshot cache',
         detail: 'Top K per window',
         column: 5,
         row: 'middle',
+        appearsAt: 6,
       },
-      { id: 'api', title: 'Ranking API', detail: 'Read snapshots', column: 5, row: 'top' },
-      { id: 'lake', title: 'Raw event store', detail: 'Cheap, columnar', column: 3, row: 'bottom' },
-      { id: 'batch', title: 'Batch job', detail: 'Exact daily counts', column: 4, row: 'bottom' },
+      {
+        id: 'api',
+        title: 'Ranking API',
+        detail: 'Read snapshots',
+        column: 5,
+        row: 'top',
+        appearsAt: 7,
+      },
+      {
+        id: 'lake',
+        title: 'Raw event store',
+        detail: 'Cheap, columnar',
+        column: 3,
+        row: 'bottom',
+        appearsAt: 8,
+      },
+      {
+        id: 'batch',
+        title: 'Batch job',
+        detail: 'Exact daily counts',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 8,
+      },
     ],
     edges: [
       ['clients', 'ingest'],
@@ -109,15 +147,45 @@ export const topK: Design = {
           'Returning before the count is updated keeps the client fast and lets ingest scale on its own. The cost is that a view is not visible in the ranking for some seconds, which the requirements allow.',
         nodes: ['clients', 'ingest'],
         travel: [['clients', 'ingest']],
+        short: 'Accept',
+        metrics: { users: '50M', requestsPerSecond: '300K', p95Latency: '20 ms', errorRate: '0%' },
+        load: { ingest: 30 },
+      },
+      {
+        title: 'A viral item hammers one counter',
+        narration:
+          'Something still has to count. The first version adds one to a counter row per item for every event, which works until one item goes viral: every increment for it contends for the same row, writes queue behind the lock, and ingest backs up until requests time out.',
+        tradeoff:
+          'A bigger database or more replicas do not help, because the contention is on one row of one item. Buffering events and counting them in memory, grouped by item, removes the shared row from the write path entirely.',
+        nodes: ['clients', 'ingest'],
+        travel: [['clients', 'ingest']],
+        short: 'Hot counter',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '3 s',
+          errorRate: '4%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { ingest: 97 },
+        traffic: [{ edge: ['clients', 'ingest'], kind: 'failed' }],
       },
       {
         title: 'Append to a partitioned log',
         narration:
-          'Events are appended to a durable log partitioned by item id, so every event for one item lands on the same partition in order.',
+          'A log joins the write path. Events are appended to a durable log partitioned by item id, so every event for one item lands on the same partition in order.',
         tradeoff:
           'Writing straight to a counter database would be simpler, but a hot item would hammer one row. The log absorbs spikes, can be replayed after a bug, and feeds both the live and the batch paths, at the cost of running one more system.',
         nodes: ['ingest', 'log'],
         travel: [['ingest', 'log']],
+        short: 'Event log',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { ingest: 45, log: 50 },
       },
       {
         title: 'Count per item, per minute',
@@ -127,6 +195,14 @@ export const topK: Design = {
           'Exact per-item counts in memory are easy to reason about and fine for millions of items. With hundreds of millions of distinct items, a count-min sketch plus a small heap uses far less memory but overcounts rare items slightly.',
         nodes: ['log', 'counters'],
         travel: [['log', 'counters']],
+        short: 'Count',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { log: 50, counters: 55 },
       },
       {
         title: 'Roll minutes into windows',
@@ -136,6 +212,14 @@ export const topK: Design = {
           'Minute buckets give a smooth sliding window with bounded memory. Finer buckets make the window more precise but cost more memory; tumbling windows would be cheaper but make rankings jump on the hour.',
         nodes: ['counters'],
         travel: [],
+        short: 'Windows',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { counters: 60 },
       },
       {
         title: 'Keep a local top list',
@@ -145,6 +229,14 @@ export const topK: Design = {
           'Sending only partial top lists cuts traffic by orders of magnitude. It is exact for the global top K because items are partitioned: an item that is in the global top must be in the top of its own partition.',
         nodes: ['counters', 'merger'],
         travel: [['counters', 'merger']],
+        short: 'Local top',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { counters: 60, merger: 15 },
       },
       {
         title: 'Merge into one ranking',
@@ -154,6 +246,14 @@ export const topK: Design = {
           'A single merger per window is simple and the input is small. It is a single point of failure, so it runs as a standby pair; if both fail, readers still see the last snapshot, only older.',
         nodes: ['merger', 'cache'],
         travel: [['merger', 'cache']],
+        short: 'Merge',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { merger: 20, cache: 10 },
       },
       {
         title: 'Serve reads from the snapshot',
@@ -163,6 +263,14 @@ export const topK: Design = {
           'Precomputing means every read is a single key lookup and the read load never touches the counters. The price is that only windows and filters chosen in advance can be served quickly; an arbitrary filter would need a slower query.',
         nodes: ['api', 'cache'],
         travel: [['api', 'cache']],
+        short: 'Serve',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 30, cache: 25 },
       },
       {
         title: 'Keep raw events for exact answers',
@@ -176,6 +284,15 @@ export const topK: Design = {
           ['lake', 'batch'],
           ['batch', 'cache'],
         ],
+        short: 'Exact batch',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '800K',
+          p95Latency: '25 ms',
+          errorRate: '0.1%',
+        },
+        load: { log: 50, lake: 40, batch: 85, cache: 25 },
+        traffic: [{ edge: ['lake', 'batch'], kind: 'heavy' }],
       },
     ],
   },
