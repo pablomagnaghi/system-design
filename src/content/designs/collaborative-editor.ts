@@ -6,6 +6,7 @@ export const collaborativeEditor: Design = {
   summary:
     'Let many people type into the same document at once and see each other within a fraction of a second: one ordered stream of operations per document, transformed so every copy converges, saved before it is acknowledged, and rebuilt quickly from snapshots.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'Several people edit the same document at the same time.',
@@ -65,10 +66,17 @@ export const collaborativeEditor: Design = {
   highLevel: {
     label: 'Send one keystroke to every editor',
     intro:
-      'Follow one edit from the moment it is typed until every other editor shows it, and see how the document stays fast to open and safe after a disconnect. Press play, or step through the stages.',
+      'Follow one edit from the moment it is typed until every other editor shows it. Watch old documents get slow to open, then see snapshots, other editors, presence and the change feed join as the design grows. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'alice', title: 'Editor A', detail: 'Types locally', column: 0, row: 'top' },
-      { id: 'bob', title: 'Editor B', detail: 'Same document', column: 0, row: 'bottom' },
+      {
+        id: 'bob',
+        title: 'Editor B',
+        detail: 'Same document',
+        column: 0,
+        row: 'bottom',
+        appearsAt: 6,
+      },
       {
         id: 'gateway',
         title: 'Socket gateway',
@@ -76,13 +84,21 @@ export const collaborativeEditor: Design = {
         column: 1,
         row: 'middle',
       },
-      { id: 'presence', title: 'Presence', detail: 'Cursors, in memory', column: 2, row: 'top' },
+      {
+        id: 'presence',
+        title: 'Presence',
+        detail: 'Cursors, in memory',
+        column: 2,
+        row: 'top',
+        appearsAt: 7,
+      },
       {
         id: 'session',
         title: 'Document session',
         detail: 'Orders + transforms',
         column: 2,
         row: 'middle',
+        appearsAt: 1,
       },
       {
         id: 'registry',
@@ -91,9 +107,30 @@ export const collaborativeEditor: Design = {
         column: 2,
         row: 'bottom',
       },
-      { id: 'snapshots', title: 'Snapshots', detail: 'Every N operations', column: 3, row: 'top' },
-      { id: 'oplog', title: 'Operation log', detail: 'Append-only', column: 3, row: 'middle' },
-      { id: 'feed', title: 'Change feed', detail: 'Search, history', column: 4, row: 'middle' },
+      {
+        id: 'snapshots',
+        title: 'Snapshots',
+        detail: 'Every N operations',
+        column: 3,
+        row: 'top',
+        appearsAt: 2,
+      },
+      {
+        id: 'oplog',
+        title: 'Operation log',
+        detail: 'Append-only',
+        column: 3,
+        row: 'middle',
+        appearsAt: 1,
+      },
+      {
+        id: 'feed',
+        title: 'Change feed',
+        detail: 'Search, history',
+        column: 4,
+        row: 'middle',
+        appearsAt: 9,
+      },
     ],
     edges: [
       ['alice', 'gateway'],
@@ -118,11 +155,41 @@ export const collaborativeEditor: Design = {
           ['alice', 'gateway'],
           ['gateway', 'registry', 'lookup'],
         ],
+        short: 'Owner',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { gateway: 35, registry: 20 },
+      },
+      {
+        title: 'Old documents open slowly',
+        narration:
+          'The first version rebuilds a document by replaying its whole operation log. That is instant for a new document, but a busy document collects millions of operations over a year. Opening it now reads the entire log, the log store saturates on a Monday morning and some opens time out.',
+        tradeoff:
+          'Replaying the log is always exact and needs nothing but the log. Its cost grows with the age of the document instead of its size, so it gets worse every day without any change in traffic. Faster log storage only delays the problem.',
+        nodes: ['alice', 'gateway', 'session', 'oplog'],
+        travel: [
+          ['alice', 'gateway'],
+          ['gateway', 'session'],
+        ],
+        short: 'Slow opens',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '4 s',
+          errorRate: '1%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { gateway: 35, session: 80, oplog: 96 },
+        traffic: [{ edge: ['alice', 'gateway'], kind: 'failed' }],
       },
       {
         title: 'Load from a snapshot',
         narration:
-          'The session loads the latest snapshot and replays only the operations written after it. The editor receives the content and the current version number.',
+          'Snapshots join the design. The session loads the latest snapshot and replays only the operations written after it. The editor receives the content and the current version number.',
         tradeoff:
           'Replaying every operation since the document was created is exact but gets slower every day. Snapshots add a background job and extra storage, and in exchange opening a document costs one snapshot read plus a short tail of operations.',
         nodes: ['gateway', 'session', 'snapshots'],
@@ -130,6 +197,14 @@ export const collaborativeEditor: Design = {
           ['gateway', 'session'],
           ['session', 'snapshots', 'load'],
         ],
+        short: 'Snapshot',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { gateway: 35, session: 40, snapshots: 25, oplog: 30 },
       },
       {
         title: 'Apply locally, send with a base version',
@@ -142,6 +217,14 @@ export const collaborativeEditor: Design = {
           ['alice', 'gateway'],
           ['gateway', 'session'],
         ],
+        short: 'Type',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { gateway: 35, session: 40 },
       },
       {
         title: 'Transform and order',
@@ -151,6 +234,14 @@ export const collaborativeEditor: Design = {
           'Operational transformation needs a central order, which the single session provides, and transform rules that are easy to get subtly wrong. A conflict-free replicated data type avoids a central order but carries per-character metadata. With a server in the middle anyway, transformation keeps documents compact.',
         nodes: ['session'],
         travel: [],
+        short: 'Transform',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { session: 45 },
       },
       {
         title: 'Save before acknowledging',
@@ -160,6 +251,14 @@ export const collaborativeEditor: Design = {
           'Acknowledging from memory would shave a few milliseconds, and a crash would then lose edits users believe were saved. Writing first costs one append per operation, which batching across a burst of keystrokes keeps cheap.',
         nodes: ['session', 'oplog'],
         travel: [['session', 'oplog', 'append']],
+        short: 'Save',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { session: 45, oplog: 35 },
       },
       {
         title: 'Broadcast to other editors',
@@ -169,6 +268,14 @@ export const collaborativeEditor: Design = {
           'Sending the whole document after each change would be simple and far too heavy. Sending operations is small and fast, and it requires every client to run the same transform rules as the server, so client and server share one implementation.',
         nodes: ['session', 'gateway', 'bob'],
         travel: [],
+        short: 'Broadcast',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { session: 45, gateway: 40 },
       },
       {
         title: 'Cursors on a separate path',
@@ -178,6 +285,14 @@ export const collaborativeEditor: Design = {
           'Treating cursors as operations would flood the log with data nobody needs tomorrow. Keeping presence ephemeral means a restart forgets it, which is fine because every client re-announces itself within a second.',
         nodes: ['gateway', 'presence'],
         travel: [['gateway', 'presence']],
+        short: 'Cursors',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { gateway: 40, presence: 50 },
       },
       {
         title: 'Reconnect and resend',
@@ -190,6 +305,15 @@ export const collaborativeEditor: Design = {
           ['bob', 'gateway'],
           ['gateway', 'session'],
         ],
+        short: 'Reconnect',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { gateway: 40, session: 45, oplog: 40 },
+        traffic: [{ edge: ['bob', 'gateway'], kind: 'failed' }],
       },
       {
         title: 'Compact and publish',
@@ -202,6 +326,15 @@ export const collaborativeEditor: Design = {
           ['oplog', 'snapshots', 'compact'],
           ['oplog', 'feed'],
         ],
+        short: 'Compact',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '200K',
+          p95Latency: '60 ms',
+          errorRate: '0.01%',
+        },
+        load: { oplog: 45, snapshots: 40, feed: 30 },
+        traffic: [{ edge: ['oplog', 'snapshots'], kind: 'heavy' }],
       },
     ],
   },
