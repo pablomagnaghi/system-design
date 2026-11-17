@@ -262,9 +262,9 @@ export const bookingSystem: Design = {
       {
         title: 'Expired holds give nights back',
         narration:
-          'A sweeper finds holds past their expiry, marks the bookings expired and deletes their claims, so the nights become bookable again. Reads also treat an expired hold as free, even before the sweeper runs.',
+          'A sweeper finds holds past their expiry, marks the bookings expired and deletes their claims, so the nights become bookable again. Before the sweeper runs, reads treat an expired hold as free, and the transaction of a new booking deletes any expired claim on its nights before inserting its own, so reads and writes agree.',
         tradeoff:
-          'A sweeper alone leaves nights blocked until it runs; checking expiry on every read alone leaves old rows behind. Doing both keeps inventory correct immediately and the table clean over time.',
+          'A sweeper alone leaves nights blocked until it runs; checking expiry on every read alone leaves old rows behind. Doing both, with the booking transaction also taking over expired claims, keeps inventory correct immediately and the table clean over time.',
         nodes: ['sweeper', 'claims'],
         travel: [['sweeper', 'claims']],
         short: 'Expire holds',
