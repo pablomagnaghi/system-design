@@ -5,6 +5,7 @@ export const onlineChess: Design = {
   title: 'Online chess',
   summary:
     'Pair players of similar rating in seconds, then run each game on one server that owns the board and both clocks: every move is checked, saved and delivered in a blink, a dropped player can come back, and ratings change only after the game ends.',
+  minutes: 9,
   difficulty: 'Medium',
   requirements: {
     functional: [
@@ -69,7 +70,7 @@ export const onlineChess: Design = {
   highLevel: {
     label: 'Pair two players and play a game',
     intro:
-      'Follow two players from matchmaking into a game, through a move, a dropped connection and a failed server, to the rating update at the end. Press play, or step through the stages.',
+      'Start with players joining a pool and getting paired, then watch game servers, the move log and the rating pipeline join the design as games need them, including a server that dies mid-game. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'players', title: 'Players', detail: 'One WebSocket each', column: 0, row: 'middle' },
       { id: 'matcher', title: 'Matchmaker', detail: 'Per time control', column: 1, row: 'top' },
@@ -80,13 +81,49 @@ export const onlineChess: Design = {
         detail: 'Game to server',
         column: 1,
         row: 'bottom',
+        appearsAt: 3,
       },
       { id: 'pool', title: 'Rating pool', detail: 'Sorted by rating', column: 2, row: 'top' },
-      { id: 'server', title: 'Game server', detail: 'Board and clocks', column: 2, row: 'middle' },
-      { id: 'movelog', title: 'Move log', detail: 'Append before ack', column: 2, row: 'bottom' },
-      { id: 'events', title: 'Game events', detail: 'Game ended', column: 3, row: 'middle' },
-      { id: 'ratings', title: 'Ratings', detail: 'Update once', column: 4, row: 'middle' },
-      { id: 'archive', title: 'Game archive', detail: 'For replay', column: 4, row: 'bottom' },
+      {
+        id: 'server',
+        title: 'Game server',
+        detail: 'Board and clocks',
+        column: 2,
+        row: 'middle',
+        appearsAt: 3,
+      },
+      {
+        id: 'movelog',
+        title: 'Move log',
+        detail: 'Append before ack',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 6,
+      },
+      {
+        id: 'events',
+        title: 'Game events',
+        detail: 'Game ended',
+        column: 3,
+        row: 'middle',
+        appearsAt: 9,
+      },
+      {
+        id: 'ratings',
+        title: 'Ratings',
+        detail: 'Update once',
+        column: 4,
+        row: 'middle',
+        appearsAt: 9,
+      },
+      {
+        id: 'archive',
+        title: 'Game archive',
+        detail: 'For replay',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 9,
+      },
     ],
     edges: [
       ['players', 'gateway', 'connect'],
@@ -112,6 +149,9 @@ export const onlineChess: Design = {
           ['players', 'gateway', 'connect'],
           ['gateway', 'matcher', 'seek'],
         ],
+        short: 'Join pool',
+        metrics: { users: '200K', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
+        load: { gateway: 20, matcher: 15, pool: 10 },
       },
       {
         title: 'Widen the window while waiting',
@@ -121,6 +161,9 @@ export const onlineChess: Design = {
           'A fixed narrow window gives the fairest games and leaves strong or weak players waiting forever. Widening trades some fairness for a game within seconds, and the speed of widening is the knob between the two.',
         nodes: ['matcher', 'pool'],
         travel: [['matcher', 'pool', 'pair']],
+        short: 'Widen window',
+        metrics: { users: '200K', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
+        load: { matcher: 25, pool: 15 },
       },
       {
         title: 'Pair atomically',
@@ -130,6 +173,9 @@ export const onlineChess: Design = {
           'Reading two seeks and removing them in separate steps can put one player in two games. An atomic step or a single owner per pool prevents that, and the cost is that one pool is served by one worker, which is plenty for a sorted set.',
         nodes: ['matcher', 'pool'],
         travel: [['matcher', 'pool', 'pair']],
+        short: 'Pair',
+        metrics: { users: '200K', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
+        load: { matcher: 30, pool: 20 },
       },
       {
         title: 'Place the game on its shard',
@@ -142,6 +188,15 @@ export const onlineChess: Design = {
           ['matcher', 'server', 'create'],
           ['gateway', 'directory', 'lookup'],
         ],
+        short: 'Place game',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '2K',
+          p95Latency: '40 ms',
+          errorRate: '0%',
+          healthy: '20 / 20',
+        },
+        load: { matcher: 25, gateway: 25, directory: 15, server: 20 },
       },
       {
         title: 'Validate the move on the server',
@@ -154,6 +209,15 @@ export const onlineChess: Design = {
           ['players', 'gateway', 'connect'],
           ['gateway', 'server', 'moves'],
         ],
+        short: 'Validate move',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '30K',
+          p95Latency: '40 ms',
+          errorRate: '0.1%',
+          healthy: '20 / 20',
+        },
+        load: { gateway: 40, server: 45 },
       },
       {
         title: 'Charge the clock on the server',
@@ -163,6 +227,15 @@ export const onlineChess: Design = {
           'Client clocks are exact for the player and trivial to cheat. Server time is fair to both sides and penalizes a player on a slow network a little, which the capped lag allowance softens without letting anyone stretch it.',
         nodes: ['server'],
         travel: [],
+        short: 'Server clock',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '30K',
+          p95Latency: '40 ms',
+          errorRate: '0.1%',
+          healthy: '20 / 20',
+        },
+        load: { server: 45 },
       },
       {
         title: 'Save, then deliver',
@@ -175,6 +248,15 @@ export const onlineChess: Design = {
           ['server', 'movelog', 'append'],
           ['gateway', 'server', 'moves'],
         ],
+        short: 'Save, deliver',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '30K',
+          p95Latency: '45 ms',
+          errorRate: '0.1%',
+          healthy: '20 / 20',
+        },
+        load: { gateway: 40, server: 50, movelog: 35 },
       },
       {
         title: 'Reconnect or lose on time',
@@ -188,6 +270,15 @@ export const onlineChess: Design = {
           ['gateway', 'directory', 'lookup'],
           ['gateway', 'server', 'moves'],
         ],
+        short: 'Reconnect',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '30K',
+          p95Latency: '45 ms',
+          errorRate: '0.1%',
+          healthy: '20 / 20',
+        },
+        load: { gateway: 45, directory: 20, server: 50 },
       },
       {
         title: 'Recover from a failed server',
@@ -199,6 +290,20 @@ export const onlineChess: Design = {
         travel: [
           ['gateway', 'directory', 'lookup'],
           ['server', 'movelog', 'append'],
+        ],
+        short: 'Server dies',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '30K',
+          p95Latency: '2.5 s',
+          errorRate: '3%',
+          healthy: '19 / 20',
+          alerts: ['healthy', 'p95Latency', 'errorRate'],
+        },
+        load: { gateway: 60, directory: 55, server: 75, movelog: 60 },
+        traffic: [
+          { edge: ['gateway', 'server'], kind: 'failed' },
+          { edge: ['gateway', 'directory'], kind: 'health' },
         ],
       },
       {
@@ -213,6 +318,15 @@ export const onlineChess: Design = {
           ['events', 'ratings'],
           ['events', 'archive'],
         ],
+        short: 'Rate game',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '30K',
+          p95Latency: '45 ms',
+          errorRate: '0.1%',
+          healthy: '20 / 20',
+        },
+        load: { server: 50, events: 30, ratings: 20, archive: 25 },
       },
     ],
   },
