@@ -5,6 +5,7 @@ export const postSearch: Design = {
   title: 'Post search',
   summary:
     'Let people search billions of short posts by keyword and get results sorted by newest or most liked: an inverted index fed by a stream, sharded by post, with like counts kept fresh enough without rewriting the index on every like.',
+  minutes: 9,
   difficulty: 'Medium',
   requirements: {
     functional: [
@@ -60,12 +61,33 @@ export const postSearch: Design = {
   highLevel: {
     label: 'Index a post, then find it',
     intro:
-      'Follow one post from the moment it is written until it shows up in a search, and see how likes, popular queries and years of old posts are handled. Press play, or step through the stages.',
+      'Follow one post from the moment it is written until it shows up in a search, and watch the design grow: first the index, then the read path, a news event that floods every shard, the query cache that absorbs it and a cold tier for old posts. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
-      { id: 'user', title: 'User', detail: 'Types a query', column: 0, row: 'middle' },
+      {
+        id: 'user',
+        title: 'User',
+        detail: 'Types a query',
+        column: 0,
+        row: 'middle',
+        appearsAt: 4,
+      },
       { id: 'posts', title: 'Post service', detail: 'Source of truth', column: 0, row: 'bottom' },
-      { id: 'cache', title: 'Query cache', detail: 'Popular queries', column: 1, row: 'top' },
-      { id: 'api', title: 'Search API', detail: 'Parse + cursor', column: 1, row: 'middle' },
+      {
+        id: 'cache',
+        title: 'Query cache',
+        detail: 'Popular queries',
+        column: 1,
+        row: 'top',
+        appearsAt: 5,
+      },
+      {
+        id: 'api',
+        title: 'Search API',
+        detail: 'Parse + cursor',
+        column: 1,
+        row: 'middle',
+        appearsAt: 4,
+      },
       { id: 'stream', title: 'Event stream', detail: 'Posts and likes', column: 1, row: 'bottom' },
       {
         id: 'broker',
@@ -73,15 +95,31 @@ export const postSearch: Design = {
         detail: 'Fan out, merge top K',
         column: 2,
         row: 'middle',
+        appearsAt: 4,
       },
-      { id: 'indexer', title: 'Indexers', detail: 'Tokenize, update', column: 2, row: 'bottom' },
-      { id: 'cold', title: 'Cold index', detail: 'Old posts, on disk', column: 3, row: 'top' },
+      {
+        id: 'indexer',
+        title: 'Indexers',
+        detail: 'Tokenize, update',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 1,
+      },
+      {
+        id: 'cold',
+        title: 'Cold index',
+        detail: 'Old posts, on disk',
+        column: 3,
+        row: 'top',
+        appearsAt: 8,
+      },
       {
         id: 'shards',
         title: 'Index shards',
         detail: 'Recent, in memory',
         column: 3,
         row: 'middle',
+        appearsAt: 1,
       },
     ],
     edges: [
@@ -104,6 +142,9 @@ export const postSearch: Design = {
           'Having the post service call the indexer directly would make posting fail or slow down whenever search is struggling. A stream decouples them and lets indexers replay from any point to rebuild, at the cost of a delay of seconds before a post is searchable.',
         nodes: ['posts', 'stream'],
         travel: [['posts', 'stream']],
+        short: 'Post events',
+        metrics: { users: '10M', requestsPerSecond: '5K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { posts: 20, stream: 15 },
       },
       {
         title: 'Build the inverted index',
@@ -116,6 +157,9 @@ export const postSearch: Design = {
           ['stream', 'indexer'],
           ['indexer', 'shards'],
         ],
+        short: 'Index',
+        metrics: { users: '10M', requestsPerSecond: '5K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { stream: 15, indexer: 35, shards: 25 },
       },
       {
         title: 'Shard by post, not by term',
@@ -125,6 +169,9 @@ export const postSearch: Design = {
           'Sharding by term sends a query to few shards, but popular terms create giant hot shards and multi-word queries must join lists across machines. Sharding by post spreads load evenly and keeps every lookup local to a shard, and in exchange every query fans out to all shards.',
         nodes: ['shards'],
         travel: [],
+        short: 'Shard',
+        metrics: { users: '10M', requestsPerSecond: '5K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { shards: 25 },
       },
       {
         title: 'Batch the likes',
@@ -137,11 +184,38 @@ export const postSearch: Design = {
           ['stream', 'indexer'],
           ['indexer', 'shards'],
         ],
+        short: 'Batch likes',
+        metrics: { users: '10M', requestsPerSecond: '100K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { stream: 50, indexer: 45, shards: 30 },
+        traffic: [{ edge: ['stream', 'indexer'], kind: 'heavy' }],
+      },
+      {
+        title: 'A news event floods every shard',
+        narration:
+          'Searches start arriving. The API hands each one to the broker, which asks every shard. Then a news event breaks and millions of people type the same few words at once. Each of those identical searches fans out to every shard again, the shards saturate, and latency and timeouts climb.',
+        tradeoff:
+          'Adding replicas helps, but every replica must hold the whole index for its slice, and the work being repeated is the same query computing the same answer. Repeated questions are cheaper to remember than to answer again.',
+        nodes: ['user', 'api', 'broker', 'shards'],
+        travel: [
+          ['user', 'api'],
+          ['api', 'broker'],
+          ['broker', 'shards'],
+        ],
+        short: 'News spike',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '300K',
+          p95Latency: '2.5 s',
+          errorRate: '3%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { api: 60, broker: 85, shards: 98 },
+        traffic: [{ edge: ['broker', 'shards'], kind: 'failed' }],
       },
       {
         title: 'Check the query cache',
         narration:
-          'A user searches. The API normalizes the query and looks it up in a cache of recent results for the first page of popular queries, kept for a few seconds to a minute.',
+          'A query cache joins the read path. The API normalizes the query and looks it up in a cache of recent results for the first page of popular queries, kept for a few seconds to a minute.',
         tradeoff:
           'A small share of queries makes up a large share of traffic, especially during news events, so caching them removes most of the fan-out work. The cost is a short window where a brand new post is missing from a cached result, which is acceptable for search.',
         nodes: ['user', 'api', 'cache'],
@@ -149,6 +223,14 @@ export const postSearch: Design = {
           ['user', 'api'],
           ['api', 'cache'],
         ],
+        short: 'Query cache',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '300K',
+          p95Latency: '60 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 50, cache: 55, broker: 25, shards: 35 },
       },
       {
         title: 'Fan out and merge',
@@ -161,6 +243,14 @@ export const postSearch: Design = {
           ['api', 'broker'],
           ['broker', 'shards'],
         ],
+        short: 'Fan out',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '300K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 50, broker: 35, shards: 40 },
       },
       {
         title: 'Paginate with a cursor',
@@ -173,6 +263,14 @@ export const postSearch: Design = {
           ['user', 'api'],
           ['api', 'broker'],
         ],
+        short: 'Cursor',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '50K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 30, broker: 25 },
       },
       {
         title: 'Age old posts into a cold index',
@@ -185,6 +283,14 @@ export const postSearch: Design = {
           ['shards', 'cold', 'age out'],
           ['broker', 'cold'],
         ],
+        short: 'Cold index',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '50K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { shards: 30, cold: 20, broker: 25 },
       },
     ],
   },
