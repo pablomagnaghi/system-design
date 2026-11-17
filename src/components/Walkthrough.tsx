@@ -9,6 +9,14 @@ import {
   VIEW,
 } from '../lib/walkthrough-layout';
 import { hasMetrics, loadLevel, metricItems } from '../lib/walkthrough-metrics';
+import {
+  DOTS_PER_PACKET,
+  dotProgress,
+  legendFor,
+  packetsFor,
+  visibleAt,
+  type Packet,
+} from '../lib/walkthrough-motion';
 import { initPlayer, playerReducer, playLabel } from '../lib/walkthrough-player';
 import styles from './Walkthrough.module.css';
 
@@ -18,7 +26,14 @@ interface Props {
 
 /** Time each stage stays on screen while playing, and how long a dot takes to travel. */
 const STAGE_MS = 9000;
-const TRAVEL_MS = 1400;
+const TRAVEL_MS = 1600;
+
+const DOT_CLASS: Record<Packet['kind'], string | undefined> = {
+  request: styles.dotRequest,
+  heavy: styles.dotHeavy,
+  health: styles.dotHealth,
+  failed: styles.dotFailed,
+};
 
 const prefersReducedMotion = (): boolean =>
   typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -55,7 +70,10 @@ export default function Walkthrough({ walkthrough }: Props) {
   );
   const done = useMemo(() => reached(stages, state.stage - 1), [stages, state.stage]);
   const activeNodes = new Set(current?.nodes);
-  const activeEdges = new Set(current?.travel.map(edgeKey));
+  const packets = useMemo(() => packetsFor(current), [current]);
+  const activeEdges = new Set(packets.map((packet) => edgeKey(packet.edge)));
+  const visible = useMemo(() => visibleAt(walkthrough, state.stage), [walkthrough, state.stage]);
+  const legend = useMemo(() => legendFor(stages), [stages]);
   const showMetrics = useMemo(() => hasMetrics(stages), [stages]);
   const metrics = metricItems(current?.metrics, stages[state.stage - 1]?.metrics);
   const labelled = stages.some((stage) => stage.short);
@@ -81,37 +99,43 @@ export default function Walkthrough({ walkthrough }: Props) {
     scroller.scrollTo({ left: target, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
   }, [current]);
 
-  // Move one dot along each edge the work travels in this stage.
+  // Stream dots along every edge with traffic in this stage, looping until the stage changes.
   useEffect(() => {
     const svg = svgRef.current;
-    const travel = current?.travel ?? [];
-    if (!svg || travel.length === 0) return;
-    const paths = travel.map((edge) =>
-      svg.querySelector<SVGPathElement>(`[data-edge="${edgeKey(edge)}"]`),
+    if (!svg || packets.length === 0) return;
+    const paths = packets.map((packet) =>
+      svg.querySelector<SVGPathElement>(`[data-edge="${edgeKey(packet.edge)}"]`),
     );
-    const place = (progress: number) => {
-      paths.forEach((path, i) => {
-        const dot = dotRefs.current[i];
-        if (!path || !dot) return;
-        const point = path.getPointAtLength(path.getTotalLength() * progress);
-        dot.style.left = percentX(point.x);
-        dot.style.top = percentY(point.y);
+    const place = (elapsed: number) => {
+      packets.forEach((packet, p) => {
+        const path = paths[p];
+        if (!path) return;
+        for (let d = 0; d < DOTS_PER_PACKET; d++) {
+          const dot = dotRefs.current[p * DOTS_PER_PACKET + d];
+          if (!dot) continue;
+          const progress = dotProgress(elapsed, d, packet.kind, TRAVEL_MS);
+          const point = path.getPointAtLength(path.getTotalLength() * progress);
+          dot.style.left = percentX(point.x);
+          dot.style.top = percentY(point.y);
+          // A failed request fades out where it gives up.
+          dot.style.opacity =
+            packet.kind === 'failed' ? String(Math.min(1, (0.8 - progress) / 0.2)) : '1';
+        }
       });
     };
     if (prefersReducedMotion()) {
-      place(1);
+      place(0);
       return;
     }
     let frame = 0;
     const startedAt = performance.now();
     const step = (now: number) => {
-      const t = Math.min((now - startedAt) / TRAVEL_MS, 1);
-      place(1 - (1 - t) ** 3); // ease-out
-      if (t < 1) frame = requestAnimationFrame(step);
+      place(now - startedAt);
+      frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
-  }, [current]);
+  }, [packets]);
 
   const nodeClass = (id: string): string => {
     const load = current?.load?.[id];
@@ -157,13 +181,15 @@ export default function Walkthrough({ walkthrough }: Props) {
             preserveAspectRatio="none"
             aria-hidden="true"
           >
-            {connectors.map(({ key, geometry }) => (
-              <path key={key} data-edge={key} d={geometry.d} className={edgeClass(key)} />
-            ))}
+            {connectors.map(({ key, geometry }) =>
+              visible.edges.has(key) ? (
+                <path key={key} data-edge={key} d={geometry.d} className={edgeClass(key)} />
+              ) : null,
+            )}
           </svg>
 
           {connectors.map(({ key, label, geometry }) =>
-            label ? (
+            label && visible.edges.has(key) ? (
               <span
                 key={`label-${key}`}
                 className={[styles.edgeLabel, activeEdges.has(key) && styles.edgeLabelActive]
@@ -189,12 +215,14 @@ export default function Walkthrough({ walkthrough }: Props) {
 
           {nodes.map((node) => {
             const box = boxes.get(node.id);
-            if (!box) return null;
+            if (!box || !visible.nodes.has(node.id)) return null;
+            // Nodes that join later animate in, so the reader sees the design grow.
+            const grows = (node.appearsAt ?? 0) > 0;
             return (
               <div
                 key={node.id}
                 data-node={node.id}
-                className={nodeClass(node.id)}
+                className={[nodeClass(node.id), grows && styles.enter].filter(Boolean).join(' ')}
                 style={{
                   left: percentX(box.x),
                   top: percentY(box.y),
@@ -211,18 +239,34 @@ export default function Walkthrough({ walkthrough }: Props) {
             );
           })}
 
-          {current?.travel.map((edge, i) => (
-            <span
-              key={`${state.stage}-${edgeKey(edge)}`}
-              ref={(element) => {
-                dotRefs.current[i] = element;
-              }}
-              className={styles.dot}
-              aria-hidden="true"
-            />
-          ))}
+          {packets.flatMap((packet, p) =>
+            Array.from({ length: DOTS_PER_PACKET }, (_, d) => (
+              <span
+                key={`${state.stage}-${p}-${d}`}
+                ref={(element) => {
+                  dotRefs.current[p * DOTS_PER_PACKET + d] = element;
+                }}
+                className={[styles.dot, DOT_CLASS[packet.kind]].filter(Boolean).join(' ')}
+                aria-hidden="true"
+              />
+            )),
+          )}
         </div>
       </div>
+
+      {legend.length > 0 && (
+        <ul className={styles.legend} aria-label="Legend">
+          {legend.map(({ kind, label: name }) => (
+            <li key={kind}>
+              <span
+                className={[styles.swatch, DOT_CLASS[kind]].filter(Boolean).join(' ')}
+                aria-hidden="true"
+              />
+              {name}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <figcaption className={styles.panel}>
         <div className={styles.controls}>
