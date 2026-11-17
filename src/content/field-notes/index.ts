@@ -1,4 +1,5 @@
 import type { FieldNote } from '../types';
+import { figmaMultiplayer } from './figma-multiplayer';
 import { discordMessageStorage } from './discord-message-storage';
 import { slackJobQueue } from './slack-job-queue';
 import { shopifyInventoryReservations } from './shopify-inventory-reservations';
@@ -8,6 +9,7 @@ export const fieldNotes: readonly FieldNote[] = [
   shopifyInventoryReservations,
   slackJobQueue,
   discordMessageStorage,
+  figmaMultiplayer,
 ];
 
 export function getFieldNote(slug: string): FieldNote | undefined {
