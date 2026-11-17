@@ -6,6 +6,7 @@ export const videoStreaming: Design = {
   summary:
     'Let creators upload large video files reliably, turn each one into many qualities in minutes, and let viewers anywhere start playing in a couple of seconds and keep playing smoothly as their connection changes.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'Upload videos of up to several gigabytes, resuming after a dropped connection.',
@@ -65,20 +66,35 @@ export const videoStreaming: Design = {
   highLevel: {
     label: 'Upload a video, then watch it',
     intro:
-      'Follow a video from the creator’s laptop through storage and the processing pipeline, then follow a viewer pressing play. Press play, or step through the stages.',
+      'Follow a video from the creator’s laptop through storage and the processing pipeline as each part joins, then follow a viewer pressing play, watch every play hit storage, and see a CDN take the load. Numbers are illustrative. Press play, or step through the stages.',
     lanes: { top: 'Upload and processing', bottom: 'Playback' },
     nodes: [
       { id: 'creator', title: 'Creator', detail: 'Uploads a file', column: 0, row: 'top' },
       { id: 'raw', title: 'Raw storage', detail: 'Original files', column: 1, row: 'top' },
-      { id: 'queue', title: 'Job queue', detail: 'Processing jobs', column: 2, row: 'top' },
+      {
+        id: 'queue',
+        title: 'Job queue',
+        detail: 'Processing jobs',
+        column: 2,
+        row: 'top',
+        appearsAt: 2,
+      },
       {
         id: 'transcode',
         title: 'Transcoders',
         detail: 'Chunks in parallel',
         column: 3,
         row: 'top',
+        appearsAt: 3,
       },
-      { id: 'packager', title: 'Packager', detail: 'Segments, manifests', column: 4, row: 'top' },
+      {
+        id: 'packager',
+        title: 'Packager',
+        detail: 'Segments, manifests',
+        column: 4,
+        row: 'top',
+        appearsAt: 4,
+      },
       { id: 'api', title: 'Video API', detail: 'Uploads, metadata', column: 1, row: 'middle' },
       { id: 'meta', title: 'Metadata DB', detail: 'Videos, status', column: 3, row: 'middle' },
       {
@@ -87,9 +103,24 @@ export const videoStreaming: Design = {
         detail: 'Every rendition',
         column: 4,
         row: 'middle',
+        appearsAt: 4,
       },
-      { id: 'viewer', title: 'Viewer', detail: 'Adaptive player', column: 0, row: 'bottom' },
-      { id: 'cdn', title: 'CDN', detail: 'Edge caches', column: 4, row: 'bottom' },
+      {
+        id: 'viewer',
+        title: 'Viewer',
+        detail: 'Adaptive player',
+        column: 0,
+        row: 'bottom',
+        appearsAt: 6,
+      },
+      {
+        id: 'cdn',
+        title: 'CDN',
+        detail: 'Edge caches',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 8,
+      },
     ],
     edges: [
       ['creator', 'api', 'start'],
@@ -116,6 +147,9 @@ export const videoStreaming: Design = {
           ['creator', 'api', 'start'],
           ['api', 'meta'],
         ],
+        short: 'Start upload',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { api: 15, meta: 10 },
       },
       {
         title: 'Send parts straight to storage',
@@ -125,6 +159,9 @@ export const videoStreaming: Design = {
           'Parts make a multi-gigabyte upload resumable and parallel, so a flaky connection costs one part rather than the whole file. The price is more client logic and parts to clean up when an upload is abandoned, which a lifecycle rule handles.',
         nodes: ['creator', 'raw'],
         travel: [['creator', 'raw', 'parts']],
+        short: 'Upload parts',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { raw: 40 },
       },
       {
         title: 'Complete and queue processing',
@@ -134,6 +171,9 @@ export const videoStreaming: Design = {
           'A durable queue between upload and processing absorbs bursts of uploads and survives worker crashes. It adds a little delay before work starts, which is small next to the minutes transcoding takes.',
         nodes: ['raw', 'queue'],
         travel: [['raw', 'queue', 'complete']],
+        short: 'Queue job',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { raw: 40, queue: 25 },
       },
       {
         title: 'Split and transcode in parallel',
@@ -143,6 +183,10 @@ export const videoStreaming: Design = {
           'Transcoding a long video on one machine can take longer than the video itself. Chunks spread the work across hundreds of machines so even long videos are ready in minutes, at the cost of an orchestrator that tracks every chunk and retries failures.',
         nodes: ['queue', 'transcode'],
         travel: [['queue', 'transcode']],
+        short: 'Transcode',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { queue: 30, transcode: 85 },
+        traffic: [{ edge: ['queue', 'transcode'], kind: 'heavy' }],
       },
       {
         title: 'Package segments and manifests',
@@ -155,6 +199,9 @@ export const videoStreaming: Design = {
           ['transcode', 'packager'],
           ['packager', 'segments'],
         ],
+        short: 'Package',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { transcode: 60, packager: 45, segments: 30 },
       },
       {
         title: 'Mark the video ready',
@@ -164,6 +211,9 @@ export const videoStreaming: Design = {
           'Flipping the status only after all renditions exist means viewers never hit a missing segment. A faster alternative publishes the lowest quality first and adds higher ones as they finish, which gets the video out sooner at the cost of a manifest that changes.',
         nodes: ['packager', 'meta'],
         travel: [['packager', 'meta', 'ready']],
+        short: 'Ready',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { packager: 20, meta: 15 },
       },
       {
         title: 'A viewer presses play',
@@ -176,15 +226,39 @@ export const videoStreaming: Design = {
           ['viewer', 'api', 'metadata'],
           ['api', 'meta'],
         ],
+        short: 'Press play',
+        metrics: { users: '20M', requestsPerSecond: '200K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { api: 40, meta: 30 },
+      },
+      {
+        title: 'Every play reads from storage',
+        narration:
+          'Before any CDN, the player fetches every segment from segment storage in one region. A popular release draws a million viewers at once, storage bandwidth saturates, viewers far away wait seconds for each segment and playback stalls.',
+        tradeoff:
+          'More bandwidth in one region does not shorten the distance to viewers on other continents, and paying for origin traffic on every view of the same popular segments is wasteful. The same few segments are watched over and over, which is exactly what edge caches are for.',
+        nodes: ['viewer', 'segments'],
+        travel: [],
+        short: 'Storage melts',
+        metrics: {
+          users: '20M',
+          requestsPerSecond: '1M',
+          p95Latency: '6 s',
+          errorRate: '5%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { segments: 98 },
       },
       {
         title: 'Stream segments from the CDN',
         narration:
-          'The player downloads the manifest and the first segments from the nearest CDN edge. It measures throughput and buffer level, and picks the rendition for each next segment.',
+          'A CDN joins the playback path. The player downloads the manifest and the first segments from the nearest edge. It measures throughput and buffer level, and picks the rendition for each next segment.',
         tradeoff:
           'Adaptive bitrate starts with a modest quality for a fast start and steps up as the buffer fills, trading peak picture quality for fewer stalls. Serving from the edge keeps latency low and keeps almost all traffic away from our storage.',
         nodes: ['viewer', 'cdn'],
         travel: [['viewer', 'cdn', 'segments']],
+        short: 'CDN',
+        metrics: { users: '20M', requestsPerSecond: '1M', p95Latency: '400 ms', errorRate: '0.2%' },
+        load: { cdn: 55, segments: 20 },
       },
       {
         title: 'Misses go back to storage',
@@ -194,6 +268,9 @@ export const videoStreaming: Design = {
           'A shield layer collapses many edge misses into one origin read, protecting storage when a video suddenly goes viral. The long tail of rarely watched videos is mostly misses, which is acceptable because each of them is cheap and rare.',
         nodes: ['cdn', 'segments'],
         travel: [['cdn', 'segments', 'miss']],
+        short: 'Edge miss',
+        metrics: { users: '20M', requestsPerSecond: '1M', p95Latency: '400 ms', errorRate: '0.2%' },
+        load: { cdn: 60, segments: 25 },
       },
     ],
   },
