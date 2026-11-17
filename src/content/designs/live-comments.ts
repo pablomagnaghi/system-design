@@ -6,6 +6,7 @@ export const liveComments: Design = {
   summary:
     'Show comments on a live video to everyone watching within a second or two: comments are stored once, published on a channel per video, and pushed over long-lived connections to servers that only listen for the videos their viewers are watching.',
   difficulty: 'Medium',
+  minutes: 8,
   requirements: {
     functional: [
       'Viewers post comments on a live video.',
@@ -62,23 +63,66 @@ export const liveComments: Design = {
   highLevel: {
     label: 'Deliver a comment to every viewer',
     intro:
-      'Follow one comment from the poster to every viewer of the same live video, and see how late joiners catch up. Press play, or step through the stages.',
+      'Follow one comment from the poster to every viewer of the same live video, and see how late joiners catch up. The design grows as it needs to: the store and pub/sub first, then the real-time servers, and a cache once a crowd of late joiners overloads the store. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'poster', title: 'Commenter', detail: 'Posts a comment', column: 0, row: 'middle' },
       { id: 'api', title: 'Comment API', detail: 'Validate, store', column: 1, row: 'middle' },
-      { id: 'store', title: 'Comment store', detail: 'By video and time', column: 2, row: 'top' },
-      { id: 'pubsub', title: 'Pub/sub', detail: 'Channel per video', column: 2, row: 'middle' },
-      { id: 'cache', title: 'Recent cache', detail: 'Last few hundred', column: 3, row: 'top' },
+      {
+        id: 'store',
+        title: 'Comment store',
+        detail: 'By video and time',
+        column: 2,
+        row: 'top',
+        appearsAt: 1,
+      },
+      {
+        id: 'pubsub',
+        title: 'Pub/sub',
+        detail: 'Channel per video',
+        column: 2,
+        row: 'middle',
+        appearsAt: 2,
+      },
+      {
+        id: 'cache',
+        title: 'Recent cache',
+        detail: 'Last few hundred',
+        column: 3,
+        row: 'top',
+        appearsAt: 7,
+      },
       {
         id: 'realtime',
         title: 'Real-time servers',
         detail: 'Hold SSE streams',
         column: 3,
         row: 'middle',
+        appearsAt: 3,
       },
-      { id: 'history', title: 'History API', detail: 'Pages by cursor', column: 4, row: 'top' },
-      { id: 'router', title: 'Router', detail: 'Groups by video', column: 4, row: 'bottom' },
-      { id: 'viewers', title: 'Viewers', detail: 'Watching live', column: 5, row: 'middle' },
+      {
+        id: 'history',
+        title: 'History API',
+        detail: 'Pages by cursor',
+        column: 4,
+        row: 'top',
+        appearsAt: 6,
+      },
+      {
+        id: 'router',
+        title: 'Router',
+        detail: 'Groups by video',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 3,
+      },
+      {
+        id: 'viewers',
+        title: 'Viewers',
+        detail: 'Watching live',
+        column: 5,
+        row: 'middle',
+        appearsAt: 3,
+      },
     ],
     edges: [
       ['poster', 'api'],
@@ -101,6 +145,9 @@ export const liveComments: Design = {
           'Posting over the same long-lived stream would save a connection, but a plain request is easier to retry, authenticate and rate limit. Writes are rare compared to reads, so their cost barely matters.',
         nodes: ['poster', 'api'],
         travel: [['poster', 'api']],
+        short: 'Post',
+        metrics: { users: '100K', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0%' },
+        load: { api: 15 },
       },
       {
         title: 'Store it durably first',
@@ -110,6 +157,9 @@ export const liveComments: Design = {
           'Publishing first and storing later would shave a few milliseconds, and risk showing comments that are then lost. Storing first makes every accepted comment durable, and a write-optimized store keeps the extra latency small.',
         nodes: ['api', 'store'],
         travel: [['api', 'store', 'write']],
+        short: 'Store first',
+        metrics: { users: '100K', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0%' },
+        load: { api: 15, store: 15 },
       },
       {
         title: 'Publish on the video channel',
@@ -119,6 +169,9 @@ export const liveComments: Design = {
           'A durable log per video would allow replay, but adds storage and offset tracking for data that is already stored. Fire-and-forget pub/sub is fast and simple, and a viewer who misses a message can always reload recent comments from the store.',
         nodes: ['api', 'pubsub'],
         travel: [['api', 'pubsub', 'publish']],
+        short: 'Publish',
+        metrics: { users: '100K', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0%' },
+        load: { api: 15, pubsub: 15 },
       },
       {
         title: 'Viewers open a stream',
@@ -131,6 +184,9 @@ export const liveComments: Design = {
           ['viewers', 'router', 'connect'],
           ['router', 'realtime'],
         ],
+        short: 'Open stream',
+        metrics: { users: '1M', requestsPerSecond: '10K', p95Latency: '100 ms', errorRate: '0.1%' },
+        load: { router: 30, realtime: 40 },
       },
       {
         title: 'Servers subscribe only to what they need',
@@ -140,6 +196,9 @@ export const liveComments: Design = {
           'Broadcasting every comment to every server is simpler, but most servers would throw most messages away. Subscribing per video keeps traffic proportional to what is watched, at the cost of tracking subscriptions on each server.',
         nodes: ['pubsub', 'realtime'],
         travel: [['pubsub', 'realtime', 'by video']],
+        short: 'Subscribe',
+        metrics: { users: '1M', requestsPerSecond: '10K', p95Latency: '100 ms', errorRate: '0.1%' },
+        load: { pubsub: 30, realtime: 40 },
       },
       {
         title: 'Push to every viewer',
@@ -149,11 +208,33 @@ export const liveComments: Design = {
           'Guaranteeing one global order would need a single sequencer per video and slow everything down. Sorting by a time-based id on the client is good enough for a chat that scrolls past in seconds.',
         nodes: ['realtime', 'viewers'],
         travel: [['realtime', 'viewers', 'push']],
+        short: 'Push',
+        metrics: { users: '1M', requestsPerSecond: '10K', p95Latency: '100 ms', errorRate: '0.1%' },
+        load: { realtime: 45, viewers: 20 },
+      },
+      {
+        title: 'A crowd joins at once',
+        narration:
+          'A popular stream starts and millions of viewers join within minutes. Each join loads recent comments from the comment store, which also takes every new comment. The store saturates: joins time out, and posting slows down with them.',
+        tradeoff:
+          'Adding store partitions does not spread this load, because every one of those reads targets the same video on the same partition. Thousands of viewers ask for the same few hundred comments, which is exactly what a small cache per video can answer.',
+        nodes: ['viewers', 'history', 'store'],
+        travel: [['viewers', 'history', 'join late']],
+        short: 'Join storm',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '50K',
+          p95Latency: '3 s',
+          errorRate: '5%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { history: 60, store: 97, api: 40 },
+        traffic: [{ edge: ['viewers', 'history'], kind: 'failed' }],
       },
       {
         title: 'Join late from a cache',
         narration:
-          'A viewer who joins mid-stream first loads the last few hundred comments. A cache keeps them per video, so a crowd joining at once does not hit the store.',
+          'A cache joins the history path. A viewer who joins mid-stream first loads the last few hundred comments, and the cache keeps them per video, so a crowd joining at once does not hit the store.',
         tradeoff:
           'Reading the store on every join is simple but a popular video can bring thousands of joins per second. A small cache per video absorbs them, at the cost of keeping it in sync with new comments.',
         nodes: ['viewers', 'history', 'cache'],
@@ -161,6 +242,9 @@ export const liveComments: Design = {
           ['viewers', 'history', 'join late'],
           ['history', 'cache'],
         ],
+        short: 'Recent cache',
+        metrics: { users: '5M', requestsPerSecond: '50K', p95Latency: '150 ms', errorRate: '0.1%' },
+        load: { history: 45, cache: 50, store: 20 },
       },
       {
         title: 'Scroll back further',
@@ -173,6 +257,9 @@ export const liveComments: Design = {
           ['history', 'cache'],
           ['cache', 'store', 'miss'],
         ],
+        short: 'Scroll back',
+        metrics: { users: '5M', requestsPerSecond: '50K', p95Latency: '150 ms', errorRate: '0.1%' },
+        load: { history: 40, cache: 45, store: 25 },
       },
       {
         title: 'Very busy videos',
@@ -182,6 +269,10 @@ export const liveComments: Design = {
           'Sending everything is complete but floods clients with text nobody can read. Batching and sampling keep the stream readable and the servers cheap, at the cost that not every viewer sees every comment live, though all remain in the store.',
         nodes: ['realtime', 'viewers'],
         travel: [['realtime', 'viewers', 'push']],
+        short: 'Busy video',
+        metrics: { users: '5M', requestsPerSecond: '50K', p95Latency: '500 ms', errorRate: '0.1%' },
+        load: { realtime: 80, viewers: 40 },
+        traffic: [{ edge: ['realtime', 'viewers'], kind: 'heavy' }],
       },
     ],
   },
