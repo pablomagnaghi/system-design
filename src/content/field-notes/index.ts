@@ -1,4 +1,5 @@
 import type { FieldNote } from '../types';
+import { spotifyDataLake } from './spotify-data-lake';
 import { figmaMultiplayer } from './figma-multiplayer';
 import { discordMessageStorage } from './discord-message-storage';
 import { slackJobQueue } from './slack-job-queue';
@@ -10,6 +11,7 @@ export const fieldNotes: readonly FieldNote[] = [
   slackJobQueue,
   discordMessageStorage,
   figmaMultiplayer,
+  spotifyDataLake,
 ];
 
 export function getFieldNote(slug: string): FieldNote | undefined {
