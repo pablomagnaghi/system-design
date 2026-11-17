@@ -6,6 +6,7 @@ export const urlShortener: Design = {
   summary:
     'Turn long links into short codes and redirect every click in a few milliseconds, with codes that never collide, reads that scale far beyond writes and click counts that never slow a redirect down.',
   difficulty: 'Easy',
+  minutes: 8,
   requirements: {
     functional: [
       'Create a short link for a long URL, optionally with a custom alias and an expiry date.',
@@ -57,7 +58,7 @@ export const urlShortener: Design = {
   highLevel: {
     label: 'Create a link, then follow a click',
     intro:
-      'First follow a new link from the request to the store, then follow a click from the browser to the redirect, and see how analytics stay off the hot path. Press play, or step through the stages.',
+      'First follow a new link from the request to the store. Then follow a click, watch a viral link overload the store, and see the cache and the click stream join the design as it grows. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'client', title: 'Clients', detail: 'Browsers and apps', column: 0, row: 'middle' },
       { id: 'gateway', title: 'Gateway', detail: 'Routing, rate limits', column: 1, row: 'middle' },
@@ -76,7 +77,14 @@ export const urlShortener: Design = {
         column: 2,
         row: 'middle',
       },
-      { id: 'cache', title: 'Cache', detail: 'Hot codes in memory', column: 3, row: 'middle' },
+      {
+        id: 'cache',
+        title: 'Cache',
+        detail: 'Hot codes in memory',
+        column: 3,
+        row: 'middle',
+        appearsAt: 5,
+      },
       { id: 'store', title: 'Link store', detail: 'Key-value, by code', column: 4, row: 'middle' },
       {
         id: 'clicks',
@@ -84,6 +92,7 @@ export const urlShortener: Design = {
         detail: 'Durable event log',
         column: 3,
         row: 'bottom',
+        appearsAt: 8,
       },
       {
         id: 'counts',
@@ -91,6 +100,7 @@ export const urlShortener: Design = {
         detail: 'Aggregated per link',
         column: 4,
         row: 'bottom',
+        appearsAt: 8,
       },
     ],
     edges: [
@@ -116,6 +126,9 @@ export const urlShortener: Design = {
           ['client', 'gateway'],
           ['gateway', 'shorten', 'create'],
         ],
+        short: 'Create',
+        metrics: { users: '10K', requestsPerSecond: '20', p95Latency: '40 ms', errorRate: '0%' },
+        load: { shorten: 10 },
       },
       {
         title: 'Take the next ID from a leased range',
@@ -125,6 +138,9 @@ export const urlShortener: Design = {
           'A counter guarantees uniqueness without checking the store, and leasing ranges means the allocator is touched once every ten thousand links. The cost is that codes are sequential and guessable, and a crashed server wastes the rest of its range; both are usually acceptable, and a reversible shuffle can hide the order.',
         nodes: ['shorten', 'ids'],
         travel: [['shorten', 'ids', 'lease']],
+        short: 'Next ID',
+        metrics: { users: '10K', requestsPerSecond: '20', p95Latency: '40 ms', errorRate: '0%' },
+        load: { shorten: 12, ids: 3 },
       },
       {
         title: 'Store the mapping',
@@ -134,6 +150,9 @@ export const urlShortener: Design = {
           'A key-value store fits the single access pattern, lookup by code, and partitions evenly. It gives up rich queries, so listing links by owner needs a small secondary index. The conditional insert is the only place where two writers can race, and the store settles it.',
         nodes: ['shorten', 'store'],
         travel: [['shorten', 'store']],
+        short: 'Store',
+        metrics: { users: '10K', requestsPerSecond: '20', p95Latency: '40 ms', errorRate: '0%' },
+        load: { shorten: 12, store: 5 },
       },
       {
         title: 'A click arrives',
@@ -146,15 +165,43 @@ export const urlShortener: Design = {
           ['client', 'gateway'],
           ['gateway', 'redirect', 'click'],
         ],
+        short: 'Click',
+        metrics: { users: '100K', requestsPerSecond: '1K', p95Latency: '30 ms', errorRate: '0%' },
+        load: { redirect: 15, store: 20 },
+      },
+      {
+        title: 'A link goes viral',
+        narration:
+          'One link is shared widely and clicks jump a hundredfold. Every click is still a read on the link store, and the partition that holds the viral code saturates: latency climbs and some redirects time out.',
+        tradeoff:
+          'Adding store nodes barely helps, because every one of those reads targets the same key on the same partition. Reads outnumber writes by orders of magnitude and a few codes take most of them, which is exactly the shape a cache is built for.',
+        nodes: ['gateway', 'redirect', 'store'],
+        travel: [
+          ['client', 'gateway'],
+          ['gateway', 'redirect', 'click'],
+        ],
+        short: 'Viral link',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '1.8 s',
+          errorRate: '6%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { redirect: 70, store: 98 },
+        traffic: [{ edge: ['gateway', 'redirect'], kind: 'failed' }],
       },
       {
         title: 'Hit: answer from the cache',
         narration:
-          'The redirect service looks the code up in an in-memory cache. Link popularity is very skewed, so a modest cache holding the hottest codes answers the large majority of clicks.',
+          'A cache joins the read path. The redirect service looks the code up in memory first, and because link popularity is very skewed, a modest cache holding the hottest codes answers the large majority of clicks.',
         tradeoff:
           'Links almost never change, so caching them is safe and staleness is barely a concern. The cost is memory and one more system to run; a TTL of hours bounds how long an expired or deleted link can keep redirecting.',
         nodes: ['redirect', 'cache'],
         travel: [['redirect', 'cache']],
+        short: 'Cache hit',
+        metrics: { users: '10M', requestsPerSecond: '100K', p95Latency: '8 ms', errorRate: '0.1%' },
+        load: { redirect: 45, cache: 35, store: 8 },
       },
       {
         title: 'Miss: read the store and fill',
@@ -164,6 +211,14 @@ export const urlShortener: Design = {
           'Read-through keeps the cache filled with exactly what people click. Negative caching protects the store from scanners guessing codes, at the risk of a brand new link answering 404 for a few seconds if someone guessed it first.',
         nodes: ['cache', 'store'],
         travel: [['cache', 'store', 'miss']],
+        short: 'Cache miss',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '12 ms',
+          errorRate: '0.1%',
+        },
+        load: { cache: 38, store: 12 },
       },
       {
         title: 'Answer with a temporary redirect',
@@ -173,6 +228,14 @@ export const urlShortener: Design = {
           'A permanent 301 lets browsers and edges cache the redirect, which saves load but hides every repeat click from analytics and makes expiry unreliable. A 302 keeps every click visible and expiry honest, at the cost of serving every click ourselves.',
         nodes: ['redirect', 'client'],
         travel: [],
+        short: 'Redirect',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '12 ms',
+          errorRate: '0.1%',
+        },
+        load: { redirect: 45 },
       },
       {
         title: 'Record the click off the hot path',
@@ -185,6 +248,14 @@ export const urlShortener: Design = {
           ['redirect', 'clicks', 'event'],
           ['clicks', 'counts'],
         ],
+        short: 'Count clicks',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '12 ms',
+          errorRate: '0.1%',
+        },
+        load: { redirect: 45, clicks: 40, counts: 20 },
       },
       {
         title: 'Expire old links',
@@ -194,6 +265,13 @@ export const urlShortener: Design = {
           'Checking expiry on read means correctness never depends on the cleanup job running on time. Never reusing codes wastes a sliver of the code space, but prevents an old printed link from silently pointing somewhere new.',
         nodes: ['store', 'cache'],
         travel: [],
+        short: 'Expire',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '12 ms',
+          errorRate: '0.1%',
+        },
       },
     ],
   },
