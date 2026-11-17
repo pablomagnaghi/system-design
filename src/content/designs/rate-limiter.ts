@@ -306,11 +306,11 @@ export const rateLimiter: Design = {
         {
           name: 'A store per region, with the limit split between regions',
           pros: 'Fast, and each region keeps working on its own.',
-          cons: 'A client spread across regions can briefly exceed the global limit.',
+          cons: 'A client concentrated in one region is capped at that region’s share, below its global limit, unless shares are rebalanced.',
         },
       ],
       choice:
-        'A store per region. A small, bounded overshoot is cheaper than adding cross-region latency to every request.',
+        'A store per region. Each region enforces its share locally and shares are rebalanced toward where a client’s traffic is; a client briefly capped below its global limit is cheaper than adding cross-region latency to every request.',
     },
   ],
   wrapUp:
