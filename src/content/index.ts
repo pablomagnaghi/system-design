@@ -33,6 +33,7 @@ import { webCrawler } from './designs/web-crawler';
 import type { Design } from './types';
 
 export type * from './types';
+export { fieldNotes, getFieldNote } from './field-notes';
 
 /** Every published design, in the order they appear on the cover. */
 export const designs: readonly Design[] = [

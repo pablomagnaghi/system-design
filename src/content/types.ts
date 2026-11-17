@@ -117,3 +117,28 @@ export interface Design {
   /** A short closing line that summarizes the design in an interview. */
   readonly wrapUp: string;
 }
+
+/**
+ * A real case retold from a company's own public engineering post (see "Field notes" in
+ * CLAUDE.md). Unlike a design, it follows the story of one change rather than the interview
+ * framework.
+ */
+export interface FieldNote {
+  readonly slug: string;
+  readonly company: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly minutes?: number;
+  /** The company's own post the note is based on. */
+  readonly source: { readonly title: string; readonly url: string; readonly year: number };
+  /** The situation before the change: what the system did and why it started to hurt. */
+  readonly context: readonly string[];
+  /** The change, told as problem → fix. Numbers here come from the source post. */
+  readonly walkthrough: Walkthrough;
+  /** What the change cost or left unsolved. */
+  readonly tradeoffs: readonly string[];
+  /** The general patterns to reuse in an interview. */
+  readonly takeaways: readonly string[];
+  /** Slugs of designs on this site that use the same ideas. */
+  readonly related?: readonly string[];
+}

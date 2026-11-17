@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { designs, getDesign } from './index';
+import { designs, fieldNotes, getDesign } from './index';
+
+// Designs and field notes share the walkthrough rules.
+const walkthroughs = [
+  ...designs.map((design) => design.highLevel),
+  ...fieldNotes.map((note) => note.walkthrough),
+];
 
 describe('designs', () => {
   it('have unique, URL-safe slugs', () => {
@@ -26,14 +32,13 @@ describe('designs', () => {
   });
 
   it('explain the trade-off of every stage of the diagram', () => {
-    for (const design of designs) {
-      for (const stage of design.highLevel.stages)
-        expect(stage.tradeoff.length).toBeGreaterThan(40);
+    for (const walkthrough of walkthroughs) {
+      for (const stage of walkthrough.stages) expect(stage.tradeoff.length).toBeGreaterThan(40);
     }
   });
 
   it('have diagrams whose stages only reference existing nodes and edges', () => {
-    for (const { highLevel } of designs) {
+    for (const highLevel of walkthroughs) {
       const nodeIds = new Set(highLevel.nodes.map((node) => node.id));
       expect(nodeIds.size).toBe(highLevel.nodes.length);
       for (const node of highLevel.nodes) {
@@ -57,7 +62,7 @@ describe('designs', () => {
   // A design can grow stage by stage: nothing may light up, carry load or carry traffic before
   // its node has appeared.
   it('only use nodes that have already appeared in each stage', () => {
-    for (const { highLevel } of designs) {
+    for (const highLevel of walkthroughs) {
       const appearsAt = new Map(highLevel.nodes.map((node) => [node.id, node.appearsAt ?? 0]));
       const edgeKeys = new Set(highLevel.edges.map(([from, to]) => `${from}>${to}`));
       for (const node of highLevel.nodes) {
@@ -82,9 +87,11 @@ describe('designs', () => {
   });
 
   it('keep stage metrics and timeline labels consistent', () => {
-    for (const design of designs) {
-      if (design.minutes !== undefined) expect(design.minutes).toBeGreaterThan(0);
-      for (const stage of design.highLevel.stages) {
+    for (const item of [...designs, ...fieldNotes]) {
+      if (item.minutes !== undefined) expect(item.minutes).toBeGreaterThan(0);
+    }
+    for (const walkthrough of walkthroughs) {
+      for (const stage of walkthrough.stages) {
         if (stage.short !== undefined) {
           expect(stage.short.length).toBeGreaterThan(0);
           expect(stage.short.length).toBeLessThanOrEqual(16);
@@ -93,5 +100,35 @@ describe('designs', () => {
         for (const key of metrics?.alerts ?? []) expect(metrics?.[key]).toBeDefined();
       }
     }
+  });
+});
+
+describe('field notes', () => {
+  it('have unique, URL-safe slugs', () => {
+    const slugs = fieldNotes.map((note) => note.slug);
+    expect(new Set(slugs).size).toBe(slugs.length);
+    for (const slug of slugs) expect(slug).toMatch(/^[a-z0-9-]+$/);
+  });
+
+  it('link the company post they are based on', () => {
+    for (const note of fieldNotes) {
+      expect(note.source.url).toMatch(/^https:\/\//);
+      expect(note.source.title.length).toBeGreaterThan(0);
+      expect(note.source.year).toBeGreaterThan(2000);
+    }
+  });
+
+  it('tell the context, the trade-offs and what to reuse', () => {
+    for (const note of fieldNotes) {
+      expect(note.context.length).toBeGreaterThan(0);
+      expect(note.tradeoffs.length).toBeGreaterThan(0);
+      expect(note.takeaways.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('only relate to designs that exist', () => {
+    const slugs = new Set(designs.map((design) => design.slug));
+    for (const note of fieldNotes)
+      for (const slug of note.related ?? []) expect(slugs).toContain(slug);
   });
 });
