@@ -20,7 +20,7 @@ export const shopifyInventoryReservations: FieldNote = {
   walkthrough: {
     label: 'A reservation, from Redis counters to rows in MySQL',
     intro:
-      'Follow a checkout as it reserves and then claims inventory, first in the old split design and then as reservations move next to the ledger. The post gives no request rates or latencies, so there is no metrics bar; the numbers in the text are quoted from the post and the load bars are approximate. Press play, or step through the stages.',
+      'Follow a checkout as it reserves and then claims inventory, first in the old split design and then as reservations move next to the ledger. The post gives no request rates or latencies, so the metrics bar shows only figures it does state: peak sales, throughput against target, reads and transactions on the primary, and CPU after the fix. All are quoted from the post; load bars are approximate. Press play, or step through the stages.',
     lanes: { top: 'Old store and visibility', bottom: 'Ledger and the rest of checkout' },
     nodes: [
       {
@@ -112,6 +112,7 @@ export const shopifyInventoryReservations: FieldNote = {
           ['proxy', 'ledger', 'claim'],
         ],
         short: 'Redis era',
+        metrics: { custom: [{ label: 'Peak sales / min', value: '$5.1M' }] },
         load: { checkout: 40, redis: 45, proxy: 35, ledger: 35 },
       },
       {
@@ -126,6 +127,7 @@ export const shopifyInventoryReservations: FieldNote = {
           ['proxy', 'ledger', 'claim'],
         ],
         short: 'Split claim',
+        metrics: { custom: [{ label: 'Peak sales / min', value: '$5.1M' }] },
         load: { checkout: 40, redis: 45, proxy: 35, ledger: 35 },
         traffic: [{ edge: ['checkout', 'redis'], kind: 'failed' }],
       },
@@ -143,6 +145,7 @@ export const shopifyInventoryReservations: FieldNote = {
           ['reserved', 'ledger', 'claim'],
         ],
         short: 'SKIP LOCKED',
+        metrics: { custom: [{ label: 'Peak sales / min', value: '$5.1M' }] },
         load: { checkout: 40, proxy: 45, units: 40, reserved: 30, ledger: 35 },
       },
       {
@@ -157,6 +160,7 @@ export const shopifyInventoryReservations: FieldNote = {
           ['replenish', 'units', 'refill'],
         ],
         short: 'Bounded pool',
+        metrics: { custom: [{ label: 'Peak sales / min', value: '$5.1M' }] },
         load: { proxy: 45, units: 55, reserved: 30, ledger: 40, replenish: 50 },
       },
       {
@@ -171,6 +175,7 @@ export const shopifyInventoryReservations: FieldNote = {
           ['replenish', 'units', 'refill'],
         ],
         short: 'Fewer locks',
+        metrics: { custom: [{ label: 'Peak sales / min', value: '$5.1M' }] },
         load: { proxy: 50, units: 45, reserved: 30, ledger: 35, replenish: 35 },
       },
       {
@@ -186,6 +191,7 @@ export const shopifyInventoryReservations: FieldNote = {
           ['units', 'reserved'],
         ],
         short: 'Lock order',
+        metrics: { custom: [{ label: 'Peak sales / min', value: '$5.1M' }] },
         load: { checkout: 45, proxy: 55, units: 45, reserved: 35, ledger: 35 },
       },
       {
@@ -200,6 +206,14 @@ export const shopifyInventoryReservations: FieldNote = {
           ['others', 'proxy'],
         ],
         short: 'Ceiling',
+        metrics: {
+          custom: [
+            { label: 'Peak sales / min', value: '$5.1M' },
+            { label: 'Throughput', value: 'Below target', alert: true },
+            { label: 'Primary reads', value: 'Baseline', alert: true },
+            { label: 'Primary transactions', value: 'Baseline', alert: true },
+          ],
+        },
         load: { checkout: 70, others: 75, proxy: 98, units: 50, reserved: 35, ledger: 60 },
         traffic: [
           { edge: ['checkout', 'proxy'], kind: 'failed' },
@@ -218,6 +232,14 @@ export const shopifyInventoryReservations: FieldNote = {
           ['proxy', 'tags', 'tagged'],
         ],
         short: 'Attribution',
+        metrics: {
+          custom: [
+            { label: 'Peak sales / min', value: '$5.1M' },
+            { label: 'Throughput', value: 'Below target', alert: true },
+            { label: 'Primary reads', value: 'Baseline', alert: true },
+            { label: 'Primary transactions', value: 'Baseline', alert: true },
+          ],
+        },
         load: { checkout: 70, others: 75, proxy: 95, ledger: 60, tags: 20 },
         traffic: [{ edge: ['others', 'proxy'], kind: 'heavy' }],
       },
@@ -234,6 +256,16 @@ export const shopifyInventoryReservations: FieldNote = {
           ['proxy', 'units', 'reserve'],
         ],
         short: 'Ceiling lifted',
+        metrics: {
+          custom: [
+            { label: 'Peak sales / min', value: '$5.1M' },
+            { label: 'Throughput', value: 'Target met' },
+            { label: 'Primary reads', value: '50% fewer' },
+            { label: 'Primary transactions', value: '33% fewer' },
+            { label: 'Writer CPU (flash sale)', value: 'Under 50%' },
+            { label: 'Reader CPU (flash sale)', value: 'Under 16%' },
+          ],
+        },
         load: {
           checkout: 50,
           others: 35,
@@ -258,6 +290,16 @@ export const shopifyInventoryReservations: FieldNote = {
           ['units', 'reserved'],
         ],
         short: 'Cutover',
+        metrics: {
+          custom: [
+            { label: 'Peak sales / min', value: '$5.1M' },
+            { label: 'Throughput', value: 'Target met' },
+            { label: 'Primary reads', value: '50% fewer' },
+            { label: 'Primary transactions', value: '33% fewer' },
+            { label: 'Writer CPU (flash sale)', value: 'Under 50%' },
+            { label: 'Reader CPU (flash sale)', value: 'Under 16%' },
+          ],
+        },
         load: {
           checkout: 50,
           redis: 30,
