@@ -6,6 +6,7 @@ export const localDelivery: Design = {
   summary:
     'Show each customer only the items that a nearby warehouse can deliver to them within the hour, keep stock per warehouse, and take orders without ever selling a unit twice, while availability reads outnumber orders by a wide margin.',
   difficulty: 'Medium',
+  minutes: 9,
   requirements: {
     functional: [
       'Show the items available for delivery to an address within a set time, such as one hour.',
@@ -67,7 +68,7 @@ export const localDelivery: Design = {
   highLevel: {
     label: 'Browse what is nearby, then order it',
     intro:
-      'Follow a customer opening the app at their address to see what can arrive within the hour, then placing an order that must not take a unit someone else already bought. Press play, or step through the stages.',
+      'Follow a customer opening the app at their address to see what can arrive within the hour, then placing an order that must not take a unit someone else already bought. Watch browsing overload the inventory database, then see the cache, the replicas and the order path join as the design grows. Numbers are illustrative. Press play, or step through the stages.',
     lanes: { top: 'Browse availability', bottom: 'Place an order' },
     nodes: [
       {
@@ -86,24 +87,61 @@ export const localDelivery: Design = {
         column: 3,
         row: 'top',
       },
-      { id: 'travel', title: 'Travel times', detail: 'Matrix, cached', column: 4, row: 'top' },
-      { id: 'cache', title: 'Availability cache', detail: 'Seconds old', column: 3, row: 'middle' },
+      {
+        id: 'travel',
+        title: 'Travel times',
+        detail: 'Matrix, cached',
+        column: 4,
+        row: 'top',
+        appearsAt: 1,
+      },
+      {
+        id: 'cache',
+        title: 'Availability cache',
+        detail: 'Seconds old',
+        column: 3,
+        row: 'middle',
+        appearsAt: 3,
+      },
       {
         id: 'replica',
         title: 'Read replicas',
         detail: 'Inventory copies',
         column: 4,
         row: 'middle',
+        appearsAt: 4,
       },
-      { id: 'orders', title: 'Order API', detail: 'One transaction', column: 2, row: 'bottom' },
-      { id: 'payments', title: 'Payments', detail: 'After the hold', column: 3, row: 'bottom' },
-      { id: 'db', title: 'Inventory DB', detail: 'Stock and orders', column: 4, row: 'bottom' },
+      {
+        id: 'orders',
+        title: 'Order API',
+        detail: 'One transaction',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 5,
+      },
+      {
+        id: 'payments',
+        title: 'Payments',
+        detail: 'After the hold',
+        column: 3,
+        row: 'bottom',
+        appearsAt: 7,
+      },
+      {
+        id: 'db',
+        title: 'Inventory DB',
+        detail: 'Stock and orders',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 2,
+      },
       {
         id: 'warehouse',
         title: 'Warehouse app',
         detail: 'Restock, pick',
         column: 5,
         row: 'bottom',
+        appearsAt: 8,
       },
     ],
     edges: [
@@ -132,6 +170,14 @@ export const localDelivery: Design = {
           ['gateway', 'avail', 'browse'],
           ['avail', 'nearby'],
         ],
+        short: 'Prefilter',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '2K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { avail: 20, nearby: 15 },
       },
       {
         title: 'Confirm with travel time',
@@ -141,15 +187,45 @@ export const localDelivery: Design = {
           'Caching by cell means two addresses at the far edges of a cell share one answer, and traffic changes are seen minutes late. In exchange most browses skip the routing call entirely; if the service is down, the radius is used with a safety margin.',
         nodes: ['nearby', 'travel'],
         travel: [['nearby', 'travel', 'short list']],
+        short: 'Travel time',
+        metrics: {
+          users: '200K',
+          requestsPerSecond: '2K',
+          p95Latency: '150 ms',
+          errorRate: '0.1%',
+        },
+        load: { nearby: 20, travel: 25 },
+      },
+      {
+        title: 'Every browse reads the inventory database',
+        narration:
+          'At first the availability API reads stock for each reachable warehouse straight from the inventory database. Browsing outnumbers ordering by a hundred to one, so as customers grow the database spends its time answering reads, latency climbs and some browses time out.',
+        tradeoff:
+          'Reading the source of truth is always current, which is why it is tempting. But the same database must also take every order, so heavy browsing slows exactly the writes that earn money. Stock a few seconds old is good enough to show on a page.',
+        nodes: ['avail', 'db'],
+        travel: [],
+        short: 'DB overload',
+        metrics: {
+          users: '2M',
+          requestsPerSecond: '20K',
+          p95Latency: '2.2 s',
+          errorRate: '4%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { avail: 60, db: 96 },
+        traffic: [{ edge: ['gateway', 'avail'], kind: 'failed' }],
       },
       {
         title: 'Read stock from the cache',
         narration:
-          'With the reachable warehouses known, the availability API reads their stock from a cache keyed by warehouse and merges it: an item is shown if any reachable warehouse has it. Entries live for a few seconds.',
+          'A cache joins the read path. With the reachable warehouses known, the availability API reads their stock from a cache keyed by warehouse and merges it: an item is shown if any reachable warehouse has it. Entries live for a few seconds.',
         tradeoff:
           'Reading stock live on every browse would put the read load on the database that also takes orders. A cache a few seconds old serves almost every read, and the cost is that a customer sometimes sees an item that just sold out and learns it at checkout.',
         nodes: ['avail', 'cache'],
         travel: [['avail', 'cache']],
+        short: 'Stock cache',
+        metrics: { users: '2M', requestsPerSecond: '20K', p95Latency: '90 ms', errorRate: '0.2%' },
+        load: { avail: 45, cache: 55, db: 40 },
       },
       {
         title: 'Fill misses from read replicas',
@@ -162,6 +238,9 @@ export const localDelivery: Design = {
           ['cache', 'replica', 'miss'],
           ['db', 'replica', 'replicate'],
         ],
+        short: 'Replicas',
+        metrics: { users: '2M', requestsPerSecond: '20K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { cache: 50, replica: 30, db: 25 },
       },
       {
         title: 'Pick a warehouse for each line',
@@ -171,6 +250,9 @@ export const localDelivery: Design = {
           'Choosing the closest warehouse per item gives the fastest single item and can split one basket into four deliveries. Minimizing warehouses first costs a slightly longer trip for some items and keeps the order cheap to deliver.',
         nodes: ['gateway', 'orders'],
         travel: [['gateway', 'orders', 'order']],
+        short: 'Pick warehouse',
+        metrics: { users: '2M', requestsPerSecond: '20K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { orders: 20 },
       },
       {
         title: 'Decrement every line in one transaction',
@@ -180,6 +262,9 @@ export const localDelivery: Design = {
           'A distributed lock per item would work and adds a lock service, timeouts and stuck locks to debug. Keeping stock and orders in one database makes the conditional decrement the guard; the cost is that each region is bound to one primary, which order volume easily fits.',
         nodes: ['orders', 'db'],
         travel: [['orders', 'db', 'decrement']],
+        short: 'Decrement',
+        metrics: { users: '2M', requestsPerSecond: '20K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { orders: 30, db: 35 },
       },
       {
         title: 'Charge after the decrement',
@@ -192,6 +277,9 @@ export const localDelivery: Design = {
           ['orders', 'payments', 'charge'],
           ['orders', 'db', 'decrement'],
         ],
+        short: 'Charge',
+        metrics: { users: '2M', requestsPerSecond: '20K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { orders: 30, payments: 25, db: 35 },
       },
       {
         title: 'Warehouses keep counts honest',
@@ -201,6 +289,9 @@ export const localDelivery: Design = {
           'The database count is only as good as the shelf. Trusting it blindly means late surprises at picking; regular counts and short-pick handling cost staff time and keep the number customers see close to what is really there.',
         nodes: ['warehouse', 'db'],
         travel: [['warehouse', 'db', 'adjust']],
+        short: 'Recount',
+        metrics: { users: '2M', requestsPerSecond: '20K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { warehouse: 15, db: 30 },
       },
       {
         title: 'Partition by region',
@@ -210,6 +301,14 @@ export const localDelivery: Design = {
           'One global database is simpler to run and becomes the limit as cities are added. Regional partitions scale with the business; the cost is cross-region reporting, which moves to a separate analytics store.',
         nodes: ['db', 'replica', 'orders'],
         travel: [],
+        short: 'By region',
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '80 ms',
+          errorRate: '0.1%',
+        },
+        load: { db: 45, replica: 35, orders: 35 },
       },
     ],
   },
