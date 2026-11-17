@@ -6,6 +6,7 @@ export const rideSharing: Design = {
   summary:
     'Match a rider with a nearby driver in seconds: drivers stream their position into an in-memory geo index, requests wait in a durable queue, and a short lock makes sure each driver sees one offer at a time and each ride gets one driver.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'Riders enter a pickup and destination and get a fare estimate.',
@@ -75,10 +76,17 @@ export const rideSharing: Design = {
   highLevel: {
     label: 'Match a rider with a driver',
     intro:
-      'Follow one ride from fare estimate to an accepted offer, while thousands of drivers keep reporting where they are. Press play, or step through the stages.',
+      'Start with a fare estimate and drivers reporting where they are, then watch a crowd overwhelm matching done inside the request, and see the queue, the matcher, the driver lock and the ride store join as the design grows. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'rider', title: 'Rider app', detail: 'Estimate, request', column: 0, row: 'middle' },
-      { id: 'driver', title: 'Driver app', detail: 'Location every 5 s', column: 0, row: 'bottom' },
+      {
+        id: 'driver',
+        title: 'Driver app',
+        detail: 'Location every 5 s',
+        column: 0,
+        row: 'bottom',
+        appearsAt: 1,
+      },
       { id: 'pricing', title: 'Pricing', detail: 'Fare and surge', column: 1, row: 'top' },
       { id: 'api', title: 'Ride API', detail: 'Idempotency key', column: 1, row: 'middle' },
       {
@@ -87,18 +95,55 @@ export const rideSharing: Design = {
         detail: 'Ingests pings',
         column: 1,
         row: 'bottom',
+        appearsAt: 1,
       },
-      { id: 'queue', title: 'Ride requests', detail: 'Queue per city', column: 2, row: 'top' },
-      { id: 'matcher', title: 'Matcher', detail: 'Ranks drivers', column: 2, row: 'middle' },
-      { id: 'geo', title: 'Geo index', detail: 'In-memory cells', column: 2, row: 'bottom' },
-      { id: 'lock', title: 'Driver lock', detail: 'One offer, with TTL', column: 3, row: 'middle' },
-      { id: 'offer', title: 'Offer', detail: 'Push, 10 s to answer', column: 4, row: 'middle' },
+      {
+        id: 'queue',
+        title: 'Ride requests',
+        detail: 'Queue per city',
+        column: 2,
+        row: 'top',
+        appearsAt: 4,
+      },
+      {
+        id: 'matcher',
+        title: 'Matcher',
+        detail: 'Ranks drivers',
+        column: 2,
+        row: 'middle',
+        appearsAt: 4,
+      },
+      {
+        id: 'geo',
+        title: 'Geo index',
+        detail: 'In-memory cells',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 2,
+      },
+      {
+        id: 'lock',
+        title: 'Driver lock',
+        detail: 'One offer, with TTL',
+        column: 3,
+        row: 'middle',
+        appearsAt: 6,
+      },
+      {
+        id: 'offer',
+        title: 'Offer',
+        detail: 'Push, 10 s to answer',
+        column: 4,
+        row: 'middle',
+        appearsAt: 7,
+      },
       {
         id: 'rides',
         title: 'Ride store',
         detail: 'requested → accepted',
         column: 5,
         row: 'middle',
+        appearsAt: 8,
       },
     ],
     edges: [
@@ -125,6 +170,9 @@ export const rideSharing: Design = {
           ['rider', 'api'],
           ['api', 'pricing', 'estimate'],
         ],
+        short: 'Estimate',
+        metrics: { users: '5M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { api: 10, pricing: 15 },
       },
       {
         title: 'Drivers report where they are',
@@ -134,6 +182,9 @@ export const rideSharing: Design = {
           'Writing every ping to a durable database would be safe but expensive at hundreds of thousands of writes per second, all of which are overwritten moments later. Treating locations as disposable trades durability for throughput: if a node is lost, the next ping rebuilds it within seconds.',
         nodes: ['driver', 'locations'],
         travel: [['driver', 'locations']],
+        short: 'Driver pings',
+        metrics: { users: '5M', requestsPerSecond: '200K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { locations: 55 },
       },
       {
         title: 'Index positions in memory',
@@ -143,11 +194,33 @@ export const rideSharing: Design = {
           'A spatial index in a relational database answers the same question, but struggles with this write rate. An in-memory cell index handles the volume and answers "who is near here" quickly, and the price is a separate store to run, with no history and no durability.',
         nodes: ['locations', 'geo'],
         travel: [['locations', 'geo', 'latest position']],
+        short: 'Geo index',
+        metrics: { users: '5M', requestsPerSecond: '200K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { locations: 55, geo: 45 },
+      },
+      {
+        title: 'A stadium empties at once',
+        narration:
+          'A concert ends and tens of thousands of riders request at the same moment. Matching still runs inside the request: each one holds an API worker while it searches for drivers and waits for an answer, the workers run out and new requests time out.',
+        tradeoff:
+          'Adding API servers helps until the next, bigger crowd, and every server still waits on slow matching instead of answering. Accepting the request quickly and matching it in the background separates how fast riders can ask from how fast drivers can be found.',
+        nodes: ['rider', 'api'],
+        travel: [['rider', 'api']],
+        short: 'Demand spike',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '6 s',
+          errorRate: '7%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { api: 98, geo: 70 },
+        traffic: [{ edge: ['rider', 'api'], kind: 'failed' }],
       },
       {
         title: 'Request a ride through a queue',
         narration:
-          'The rider requests the ride with the fare id and an idempotency key. The API writes a requested ride and puts it on a queue partitioned by city, then returns at once; the app waits for updates.',
+          'A queue joins the request path. The rider requests the ride with the fare id and an idempotency key, and the API writes a requested ride and puts it on a queue partitioned by city, then returns at once; the app waits for updates.',
         tradeoff:
           'Matching inside the request would be simpler, but a spike in one city would exhaust the API and drop requests. A durable queue absorbs the spike and lets matchers scale per city, at the cost of a few hundred milliseconds of delay and an asynchronous flow for the app.',
         nodes: ['rider', 'api', 'queue', 'matcher'],
@@ -156,6 +229,14 @@ export const rideSharing: Design = {
           ['api', 'queue', 'request'],
           ['queue', 'matcher'],
         ],
+        short: 'Ride queue',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '300 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 30, queue: 50, matcher: 40 },
       },
       {
         title: 'Find nearby drivers',
@@ -165,6 +246,14 @@ export const rideSharing: Design = {
           'Straight-line distance is cheap but wrong across rivers and highways. Estimating travel time is better for riders and costs a routing call per candidate, so the matcher only does it for the closest handful.',
         nodes: ['matcher', 'geo'],
         travel: [['matcher', 'geo', 'nearby']],
+        short: 'Nearby',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '300 ms',
+          errorRate: '0.1%',
+        },
+        load: { matcher: 45, geo: 50 },
       },
       {
         title: 'Lock one driver',
@@ -174,6 +263,14 @@ export const rideSharing: Design = {
           'Without a lock, two matchers could offer the same driver two rides at once. A lock in a shared cache adds a dependency, and its time to live means a crashed matcher frees the driver on its own instead of blocking them forever.',
         nodes: ['matcher', 'lock'],
         travel: [['matcher', 'lock']],
+        short: 'Lock driver',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '300 ms',
+          errorRate: '0.1%',
+        },
+        load: { matcher: 45, lock: 20 },
       },
       {
         title: 'Offer with a deadline',
@@ -183,6 +280,14 @@ export const rideSharing: Design = {
           'Offering to one driver at a time is fair and avoids races, but a slow decline delays the rider. Offering to several at once is faster and leaves drivers who accepted with nothing; a short deadline keeps the sequential approach fast enough.',
         nodes: ['lock', 'offer'],
         travel: [['lock', 'offer']],
+        short: 'Offer',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '300 ms',
+          errorRate: '0.1%',
+        },
+        load: { lock: 20, offer: 30 },
       },
       {
         title: 'Accept and assign',
@@ -192,6 +297,14 @@ export const rideSharing: Design = {
           'The conditional update is the final guard: even if a lock expired early or a retry arrived late, only one driver can be written on the ride. It costs one more check on a hot path, and it is what makes the lock an optimization rather than the only defense.',
         nodes: ['offer', 'rides'],
         travel: [['offer', 'rides', 'accepted']],
+        short: 'Accept',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '300 ms',
+          errorRate: '0.1%',
+        },
+        load: { offer: 30, rides: 25 },
       },
       {
         title: 'Decline or timeout moves on',
@@ -204,6 +317,14 @@ export const rideSharing: Design = {
           ['matcher', 'lock'],
           ['lock', 'offer'],
         ],
+        short: 'Decline',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '250K',
+          p95Latency: '300 ms',
+          errorRate: '0.1%',
+        },
+        load: { matcher: 50, lock: 25, offer: 30 },
       },
     ],
   },
