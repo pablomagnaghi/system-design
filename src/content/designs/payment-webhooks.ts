@@ -295,7 +295,7 @@ export const paymentWebhooks: Design = {
         },
         {
           name: 'Transactional outbox',
-          pros: 'Side effects are recorded in the same transaction and sent once after commit.',
+          pros: 'Side effects are recorded in the same transaction and sent at least once after commit. The outbox row id is the idempotency key, so a resend is harmless.',
           cons: 'One more table and worker.',
         },
       ],
