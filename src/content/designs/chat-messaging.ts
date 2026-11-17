@@ -6,6 +6,7 @@ export const chatMessaging: Design = {
   summary:
     'Deliver one-to-one and group messages in real time to millions of connected devices, keep them in order, never lose one when a phone is offline or a server dies, and let every device catch up where it left off.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'Send messages in one-to-one chats and in groups of up to a few hundred members.',
@@ -66,7 +67,7 @@ export const chatMessaging: Design = {
   highLevel: {
     label: 'Send a message to a group',
     intro:
-      'Follow one message from the sender’s phone, through ordering and storage, to every member of the group, online or not; then see what happens when a gateway fails. Press play, or step through the stages.',
+      'Follow one message from the sender’s phone, through ordering and storage, to every member of the group, online or not. The design grows as the message service, the store, inboxes, pub/sub and push join, and then a gateway crashes. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'devices', title: 'Devices', detail: 'Phones and browsers', column: 0, row: 'middle' },
       { id: 'lb', title: 'Load balancer', detail: 'Long-lived sockets', column: 1, row: 'middle' },
@@ -84,17 +85,40 @@ export const chatMessaging: Design = {
         detail: 'Orders and stores',
         column: 3,
         row: 'middle',
+        appearsAt: 1,
       },
-      { id: 'pubsub', title: 'Pub/sub', detail: 'A channel per user', column: 3, row: 'top' },
+      {
+        id: 'pubsub',
+        title: 'Pub/sub',
+        detail: 'A channel per user',
+        column: 3,
+        row: 'top',
+        appearsAt: 4,
+      },
       {
         id: 'store',
         title: 'Message store',
         detail: 'By conversation',
         column: 4,
         row: 'middle',
+        appearsAt: 2,
       },
-      { id: 'inbox', title: 'Inboxes', detail: 'Unsynced chats', column: 4, row: 'bottom' },
-      { id: 'push', title: 'Push sender', detail: 'Offline devices', column: 5, row: 'bottom' },
+      {
+        id: 'inbox',
+        title: 'Inboxes',
+        detail: 'Unsynced chats',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 3,
+      },
+      {
+        id: 'push',
+        title: 'Push sender',
+        detail: 'Offline devices',
+        column: 5,
+        row: 'bottom',
+        appearsAt: 6,
+      },
     ],
     edges: [
       ['devices', 'lb'],
@@ -120,6 +144,16 @@ export const chatMessaging: Design = {
           ['lb', 'gateway'],
           ['gateway', 'presence', 'online'],
         ],
+        short: 'Connect',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { lb: 30, gateway: 55, presence: 30 },
+        traffic: [{ edge: ['gateway', 'presence'], kind: 'health' }],
       },
       {
         title: 'Send with a client message ID',
@@ -129,6 +163,15 @@ export const chatMessaging: Design = {
           'Networks drop acks, so the app will retry. The client message ID lets the server recognize a retry and return the original result instead of storing a duplicate. It costs a small dedup check per conversation, kept for a few minutes.',
         nodes: ['devices', 'gateway', 'messages'],
         travel: [['gateway', 'messages', 'send']],
+        short: 'Send',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { gateway: 55, messages: 35 },
       },
       {
         title: 'Order and store before acking',
@@ -138,6 +181,15 @@ export const chatMessaging: Design = {
           'A per-conversation sequence gives one order every member agrees on, without a global clock. It needs a single writer per conversation, which can become a hot spot for very busy groups. Acking only after storage adds a few milliseconds and is what makes "sent" mean "will not be lost".',
         nodes: ['messages', 'store'],
         travel: [['messages', 'store', 'append']],
+        short: 'Order + store',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { messages: 40, store: 35 },
       },
       {
         title: 'Mark every member’s inbox',
@@ -147,6 +199,15 @@ export const chatMessaging: Design = {
           'Writing one inbox entry per member is fan-out on write: cheap for small groups, heavy for groups of thousands. Capping group size keeps it predictable; very large channels would switch to members pulling from the conversation instead.',
         nodes: ['messages', 'inbox'],
         travel: [['messages', 'inbox']],
+        short: 'Inboxes',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { messages: 40, inbox: 30 },
       },
       {
         title: 'Publish to each member’s channel',
@@ -159,6 +220,15 @@ export const chatMessaging: Design = {
           ['messages', 'pubsub', 'publish'],
           ['pubsub', 'gateway', 'deliver'],
         ],
+        short: 'Publish',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { messages: 40, pubsub: 45, gateway: 55 },
       },
       {
         title: 'Push to online devices',
@@ -168,6 +238,15 @@ export const chatMessaging: Design = {
           'Pub/sub is fire and forget, so a message can be lost between the bus and the device. That is acceptable because the store and the inbox are the source of truth: a missed push becomes a gap the device fills on its next sync.',
         nodes: ['gateway', 'devices'],
         travel: [],
+        short: 'Deliver',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { gateway: 55 },
       },
       {
         title: 'Notify offline devices',
@@ -177,6 +256,15 @@ export const chatMessaging: Design = {
           'Waiting a moment avoids notifying a phone that is about to receive the message over its socket. Platform push is best effort and rate limited, so it only wakes the app; the message itself always comes from our own sync.',
         nodes: ['inbox', 'push'],
         travel: [['inbox', 'push', 'offline']],
+        short: 'Notify offline',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { inbox: 30, push: 25 },
       },
       {
         title: 'Catch up on reconnect',
@@ -186,11 +274,46 @@ export const chatMessaging: Design = {
           'Sequence cursors make catch-up exact: no gaps and no duplicates, on any number of devices. The cost is storing a cursor per device per active conversation, and a burst of reads when many phones reconnect at once.',
         nodes: ['devices', 'gateway', 'inbox', 'store'],
         travel: [],
+        short: 'Catch up',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '80 ms',
+          errorRate: '0.01%',
+          healthy: '10 / 10',
+        },
+        load: { gateway: 55, inbox: 40, store: 45 },
+      },
+      {
+        title: 'A gateway crashes',
+        narration:
+          'One of ten gateways crashes and a hundred thousand sockets drop at once. Every app reconnects immediately, so they all hit the remaining gateways in the same second: handshakes queue, some connections time out and retry, and the retries add to the pile.',
+        tradeoff:
+          'Spare gateway capacity absorbs a slow trickle of reconnects, not a wall of them arriving together. Running every gateway half empty to survive this would double the fleet, so the fix belongs in how clients come back, not only in how many servers wait for them.',
+        nodes: ['devices', 'lb', 'gateway'],
+        travel: [
+          ['devices', 'lb'],
+          ['lb', 'gateway'],
+        ],
+        short: 'Gateway crash',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '2.5 s',
+          errorRate: '4%',
+          healthy: '9 / 10',
+          alerts: ['p95Latency', 'errorRate', 'healthy'],
+        },
+        load: { lb: 75, gateway: 96, presence: 60 },
+        traffic: [
+          { edge: ['lb', 'gateway'], kind: 'failed' },
+          { edge: ['devices', 'lb'], kind: 'failed' },
+        ],
       },
       {
         title: 'When a gateway dies',
         narration:
-          'The sockets on a failed gateway drop. Devices reconnect with backoff and jitter to another gateway, resubscribe and run the same catch-up.',
+          'Devices reconnect with backoff and jitter, so they spread over a minute instead of a second. Each one lands on another gateway, resubscribes and runs the same catch-up, and a replacement gateway starts and takes its share of new connections.',
         tradeoff:
           'Because no message lives only in a gateway, losing one costs a reconnect and nothing else. Jittered backoff matters: without it, a hundred thousand devices reconnecting in the same second can knock over the next gateway.',
         nodes: ['devices', 'lb', 'gateway', 'presence'],
@@ -198,6 +321,15 @@ export const chatMessaging: Design = {
           ['devices', 'lb'],
           ['lb', 'gateway'],
         ],
+        short: 'Reconnect',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '500K',
+          p95Latency: '90 ms',
+          errorRate: '0.05%',
+          healthy: '10 / 10',
+        },
+        load: { lb: 40, gateway: 65, presence: 40, inbox: 45, store: 50 },
       },
     ],
   },
