@@ -98,6 +98,12 @@ describe('designs', () => {
         }
         const metrics = stage.metrics;
         for (const key of metrics?.alerts ?? []) expect(metrics?.[key]).toBeDefined();
+        const labels = (metrics?.custom ?? []).map((metric) => metric.label);
+        expect(new Set(labels).size).toBe(labels.length);
+        for (const label of labels) {
+          expect(label.length).toBeGreaterThan(0);
+          expect(label.length).toBeLessThanOrEqual(24);
+        }
       }
     }
   });

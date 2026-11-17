@@ -21,6 +21,27 @@ describe('metricItems', () => {
     expect(items.find((item) => item.key === 'errorRate')?.status).toBe('alert');
   });
 
+  it('adds labelled metrics after the fixed ones, with the same alert and recovery rules', () => {
+    const before: StageMetrics = {
+      custom: [
+        { label: 'p99 read', value: '125 ms', alert: true },
+        { label: 'Nodes', value: '177' },
+      ],
+    };
+    const after: StageMetrics = {
+      users: '1M',
+      custom: [
+        { label: 'p99 read', value: '15 ms' },
+        { label: 'Nodes', value: '72' },
+      ],
+    };
+    const items = metricItems(after, before);
+    expect(items.map((item) => item.key)).toEqual(['users', 'custom:p99 read', 'custom:Nodes']);
+    expect(items[1]).toMatchObject({ label: 'p99 read', value: '15 ms', status: 'recovered' });
+    expect(items[2]?.status).toBe('normal');
+    expect(metricItems(before, undefined)[0]?.status).toBe('alert');
+  });
+
   it('returns nothing for a stage without metrics', () => {
     expect(metricItems(undefined, undefined)).toEqual([]);
   });
