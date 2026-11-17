@@ -292,9 +292,9 @@ export const rideSharing: Design = {
       {
         title: 'Accept and assign',
         narration:
-          'When the driver accepts, the ride moves from requested to accepted with a conditional update that only succeeds if the ride has no driver yet. The driver becomes busy and the rider app shows them on the map.',
+          'When the driver accepts, the ride moves from requested to accepted in one conditional transaction: the ride is updated only if it has no driver yet, and the driver is marked busy only if still available for this offer. The rider app then shows them on the map.',
         tradeoff:
-          'The conditional update is the final guard: even if a lock expired early or a retry arrived late, only one driver can be written on the ride. It costs one more check on a hot path, and it is what makes the lock an optimization rather than the only defense.',
+          'The conditional update is the final guard: even if a lock expired early or a retry arrived late, only one driver can be written on the ride, and a driver can only be attached to one ride. It costs one more check on a hot path, and it is what makes the lock an optimization rather than the only defense.',
         nodes: ['offer', 'rides'],
         travel: [['offer', 'rides', 'accepted']],
         short: 'Accept',
