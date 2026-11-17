@@ -5,6 +5,7 @@ export const proximitySearch: Design = {
   title: 'Proximity search for places',
   summary:
     'Find the places near a point in tens of milliseconds: a geohash index small enough to keep in memory on every search node, an exact distance filter on a handful of candidates, and owner edits streamed into the index within minutes.',
+  minutes: 8,
   difficulty: 'Medium',
   requirements: {
     functional: [
@@ -61,29 +62,73 @@ export const proximitySearch: Design = {
   highLevel: {
     label: 'Search for places nearby',
     intro:
-      'Follow one search from a point on the map to a sorted list of places, then follow an owner edit until it shows up in results. Press play, or step through the stages.',
+      'Follow one search from a point on the map to a sorted list of places, then follow an owner edit until it shows up in results. Watch the index, the caches and the change stream join the design as it grows, and see a dense city center slow every search until cells adapt to density. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'user', title: 'User', detail: 'Point and radius', column: 0, row: 'middle' },
-      { id: 'owner', title: 'Owner', detail: 'Edits a place', column: 0, row: 'bottom' },
-      { id: 'cache', title: 'Results cache', detail: 'By cell and filter', column: 1, row: 'top' },
+      {
+        id: 'owner',
+        title: 'Owner',
+        detail: 'Edits a place',
+        column: 0,
+        row: 'bottom',
+        appearsAt: 5,
+      },
+      {
+        id: 'cache',
+        title: 'Results cache',
+        detail: 'By cell and filter',
+        column: 1,
+        row: 'top',
+        appearsAt: 1,
+      },
       { id: 'api', title: 'Search API', detail: 'Stateless', column: 1, row: 'middle' },
-      { id: 'writes', title: 'Place API', detail: 'Owner writes', column: 1, row: 'bottom' },
-      { id: 'geo', title: 'Geo index', detail: 'Geohash, in memory', column: 2, row: 'middle' },
-      { id: 'db', title: 'Place database', detail: 'Source of truth', column: 2, row: 'bottom' },
+      {
+        id: 'writes',
+        title: 'Place API',
+        detail: 'Owner writes',
+        column: 1,
+        row: 'bottom',
+        appearsAt: 5,
+      },
+      {
+        id: 'geo',
+        title: 'Geo index',
+        detail: 'Geohash, in memory',
+        column: 2,
+        row: 'middle',
+        appearsAt: 2,
+      },
+      {
+        id: 'db',
+        title: 'Place database',
+        detail: 'Source of truth',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 4,
+      },
       {
         id: 'filter',
         title: 'Filter and sort',
         detail: 'Exact distance',
         column: 3,
         row: 'middle',
+        appearsAt: 3,
       },
-      { id: 'cdc', title: 'Change stream', detail: 'From the database', column: 3, row: 'bottom' },
+      {
+        id: 'cdc',
+        title: 'Change stream',
+        detail: 'From the database',
+        column: 3,
+        row: 'bottom',
+        appearsAt: 6,
+      },
       {
         id: 'details',
         title: 'Details cache',
         detail: 'Hydrate results',
         column: 4,
         row: 'middle',
+        appearsAt: 4,
       },
     ],
     edges: [
@@ -107,6 +152,9 @@ export const proximitySearch: Design = {
           'Keeping the API stateless lets it scale by adding copies, at the cost of looking everything up on each request. With reads this cheap, that is the right trade.',
         nodes: ['user', 'api'],
         travel: [['user', 'api']],
+        short: 'Search',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '60 ms', errorRate: '0%' },
+        load: { api: 30 },
       },
       {
         title: 'Cache popular areas',
@@ -116,6 +164,9 @@ export const proximitySearch: Design = {
           'Rounding the point means nearby users share a cache entry, which raises the hit rate a lot. The cost is that results are for the cell, not the exact point, so the final distance sort still runs on the user point.',
         nodes: ['api', 'cache'],
         travel: [['api', 'cache', 'popular areas']],
+        short: 'Area cache',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '20 ms', errorRate: '0%' },
+        load: { api: 30, cache: 40 },
       },
       {
         title: 'Cover the circle with cells',
@@ -125,6 +176,9 @@ export const proximitySearch: Design = {
           'Reading only the cell of the point misses places just across its edge. Adding the neighbors fixes that at the cost of reading nine cells, which is still a handful of lookups in memory.',
         nodes: ['api', 'geo'],
         travel: [['api', 'geo', 'cells']],
+        short: 'Nine cells',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '40 ms', errorRate: '0%' },
+        load: { api: 30, geo: 35 },
       },
       {
         title: 'Filter by exact distance',
@@ -134,6 +188,9 @@ export const proximitySearch: Design = {
           'Cells are squares and the search is a circle, so cells alone return extra places. Computing the exact distance on a few hundred candidates is cheap, and keeps the index simple instead of trying to make it exact.',
         nodes: ['geo', 'filter'],
         travel: [['geo', 'filter', 'candidates']],
+        short: 'Exact distance',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '50 ms', errorRate: '0%' },
+        load: { geo: 35, filter: 30 },
       },
       {
         title: 'Hydrate the results',
@@ -143,6 +200,9 @@ export const proximitySearch: Design = {
           'Storing all details in the index would avoid this step, but would make the index too large to keep in memory everywhere. Keeping the index lean (id, coordinates, category) and hydrating only one page of results gives the best of both.',
         nodes: ['filter', 'details'],
         travel: [['filter', 'details']],
+        short: 'Hydrate',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '60 ms', errorRate: '0%' },
+        load: { filter: 30, details: 35, db: 10 },
       },
       {
         title: 'An owner edits a place',
@@ -155,6 +215,9 @@ export const proximitySearch: Design = {
           ['owner', 'writes'],
           ['writes', 'db'],
         ],
+        short: 'Owner edit',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '60 ms', errorRate: '0%' },
+        load: { writes: 10, db: 15 },
       },
       {
         title: 'Stream changes into the index',
@@ -167,6 +230,9 @@ export const proximitySearch: Design = {
           ['db', 'cdc'],
           ['cdc', 'geo', 'update cells'],
         ],
+        short: 'Change stream',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '60 ms', errorRate: '0%' },
+        load: { db: 15, cdc: 20, geo: 40 },
       },
       {
         title: 'Invalidate stale details',
@@ -176,15 +242,47 @@ export const proximitySearch: Design = {
           'A short time to live alone would serve old details for its whole length. Invalidating on change is more precise, and the time to live remains as a safety net if an event is lost.',
         nodes: ['cdc', 'details'],
         travel: [['cdc', 'details', 'invalidate']],
+        short: 'Invalidate',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '60 ms', errorRate: '0%' },
+        load: { cdc: 20, details: 35 },
+      },
+      {
+        title: 'A dense center slows every search',
+        narration:
+          'Usage grows in big cities. With one cell size for every query, the nine cells around a downtown point hold thousands of places, and each search filters and sorts all of them. Searches in dense areas slow down, pile up and start to time out, while rural searches come back empty.',
+        tradeoff:
+          'More search nodes would spread the work, but each query would still read and sort thousands of candidates to show twenty. The waste is in the cell size, not in the number of machines.',
+        nodes: ['user', 'api', 'geo', 'filter'],
+        travel: [
+          ['user', 'api'],
+          ['api', 'geo', 'cells'],
+          ['geo', 'filter', 'candidates'],
+        ],
+        short: 'Dense center',
+        metrics: {
+          users: '50M',
+          requestsPerSecond: '20K',
+          p95Latency: '1.5 s',
+          errorRate: '2%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { api: 60, geo: 75, filter: 97 },
+        traffic: [
+          { edge: ['geo', 'filter'], kind: 'heavy' },
+          { edge: ['user', 'api'], kind: 'failed' },
+        ],
       },
       {
         title: 'Dense cities and empty countryside',
         narration:
-          'In a dense center the nine cells hold thousands of places; in the countryside they may hold none. The service shortens the cells and caps candidates in dense areas, and widens the search step by step where results are few.',
+          'Cell size now adapts to density. In a dense center the service shortens the cells and caps candidates; in the countryside, where the nine cells may hold nothing, it widens the search step by step.',
         tradeoff:
           'A fixed cell size is easy but wrong at both extremes. Adapting the cell length per query costs a little logic and keeps both cases fast and useful; a tree that splits by density is the heavier alternative if this is not enough.',
         nodes: ['api', 'geo'],
         travel: [['api', 'geo', 'cells']],
+        short: 'Adapt cells',
+        metrics: { users: '50M', requestsPerSecond: '20K', p95Latency: '60 ms', errorRate: '0.1%' },
+        load: { api: 35, geo: 40 },
       },
     ],
   },
