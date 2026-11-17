@@ -20,7 +20,7 @@ export const metaZgateway: FieldNote = {
   walkthrough: {
     label: 'Move ZippyDB traffic behind a proxy',
     intro:
-      'Start with clients connected straight to the database fleet, see the connection mesh fail, then watch the proxy tier and its features join one by one. Metric values are quoted from Meta’s post; it gives few before-and-after numbers, so most of the story shows in the load bars, which are approximate. Press play, or step through the stages.',
+      'Start with clients connected straight to the database fleet, see the connection mesh fail, then watch the proxy tier and its features join one by one. Metric values are quoted from Meta’s post. The connection counts after the change come from the post’s own model, not a measurement, and the load shedding numbers from one overload test. Load bars are approximate. Press play, or step through the stages.',
     nodes: [
       {
         id: 'clients',
@@ -126,7 +126,13 @@ export const metaZgateway: FieldNote = {
           ['lib', 'zservers'],
         ],
         short: 'Direct access',
-        metrics: { users: '1M+ hosts' },
+        metrics: {
+          users: '1M+ hosts',
+          custom: [
+            { label: 'Conns per host (model)', value: 'Tens of thousands' },
+            { label: 'Total conns (model)', value: 'Full mesh' },
+          ],
+        },
         load: { clients: 40, lib: 50, zservers: 55 },
       },
       {
@@ -138,7 +144,13 @@ export const metaZgateway: FieldNote = {
         nodes: ['lib', 'zservers'],
         travel: [['lib', 'zservers']],
         short: 'Mesh',
-        metrics: { users: '1M+ hosts' },
+        metrics: {
+          users: '1M+ hosts',
+          custom: [
+            { label: 'Conns per host (model)', value: 'Tens of thousands', alert: true },
+            { label: 'Total conns (model)', value: 'Full mesh', alert: true },
+          ],
+        },
         load: { clients: 45, lib: 70, zservers: 85 },
         traffic: [{ edge: ['lib', 'zservers'], kind: 'heavy' }],
       },
@@ -151,7 +163,13 @@ export const metaZgateway: FieldNote = {
         nodes: ['lib', 'zservers'],
         travel: [['lib', 'zservers']],
         short: 'Storm',
-        metrics: { users: '1M+ hosts' },
+        metrics: {
+          users: '1M+ hosts',
+          custom: [
+            { label: 'Conns per host (model)', value: 'Tens of thousands', alert: true },
+            { label: 'Total conns (model)', value: 'Full mesh', alert: true },
+          ],
+        },
         load: { clients: 50, lib: 90, zservers: 100 },
         traffic: [{ edge: ['lib', 'zservers'], kind: 'failed' }],
       },
@@ -169,7 +187,14 @@ export const metaZgateway: FieldNote = {
           ['engine', 'zservers'],
         ],
         short: 'Proxy tier',
-        metrics: { users: '1M+ hosts' },
+        metrics: {
+          users: '1M+ hosts',
+          custom: [
+            { label: 'Conns per host (model)', value: '~97-98% fewer' },
+            { label: 'Total conns (model)', value: '~19x fewer' },
+            { label: 'Proxy compute cost', value: '~6%' },
+          ],
+        },
         load: { clients: 40, lib: 40, router: 35, gateway: 55, engine: 45, zservers: 50 },
       },
       {
@@ -186,7 +211,15 @@ export const metaZgateway: FieldNote = {
           ['router', 'gateway'],
         ],
         short: 'Ramp by flag',
-        metrics: { users: '1M+ hosts', requestsPerSecond: '1B+ ops' },
+        metrics: {
+          users: '1M+ hosts',
+          requestsPerSecond: '1B+ ops',
+          custom: [
+            { label: 'Conns per host (model)', value: '~97-98% fewer' },
+            { label: 'Total conns (model)', value: '~19x fewer' },
+            { label: 'Traffic via gateway', value: '~40%' },
+          ],
+        },
         load: { clients: 40, lib: 30, router: 40, gateway: 55, engine: 45, zservers: 40 },
       },
       {
@@ -218,7 +251,15 @@ export const metaZgateway: FieldNote = {
         nodes: ['gateway', 'admission'],
         travel: [['gateway', 'admission']],
         short: 'Load shedding',
-        metrics: { users: '1M+ hosts', requestsPerSecond: '1B+ ops' },
+        metrics: {
+          users: '1M+ hosts',
+          requestsPerSecond: '1B+ ops',
+          custom: [
+            { label: 'Tenants shed (test)', value: '6 of ~1,350' },
+            { label: 'Others served (test)', value: '99.9%, 0 rejected' },
+            { label: 'Goodput (overload test)', value: '~97-98%' },
+          ],
+        },
         load: { gateway: 92, admission: 80, engine: 50, zservers: 35 },
         traffic: [
           { edge: ['router', 'gateway'], kind: 'heavy' },
