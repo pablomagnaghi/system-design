@@ -5,6 +5,7 @@ export const distributedCache: Design = {
   title: 'Distributed cache',
   summary:
     'Put a shared, in-memory cache in front of a database so reads take a millisecond instead of tens, without serving data that stays wrong, melting the database on a miss storm or losing everything when a node dies.',
+  minutes: 9,
   difficulty: 'Medium',
   requirements: {
     functional: [
@@ -54,20 +55,56 @@ export const distributedCache: Design = {
   highLevel: {
     label: 'Run a read through the cache',
     intro:
-      'Follow one read from the application to the cache and, on a miss, to the database; then see how writes, evictions and failures keep the cache honest. Press play, or step through the stages.',
+      'Start with every read hitting the database, then watch the cache layers join one by one: a local cache, a sharded cluster, a single-flight loader and a change stream. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
-      { id: 'local', title: 'Local cache', detail: 'Hottest keys, seconds', column: 0, row: 'top' },
+      {
+        id: 'local',
+        title: 'Local cache',
+        detail: 'Hottest keys, seconds',
+        column: 0,
+        row: 'top',
+        appearsAt: 1,
+      },
       { id: 'app', title: 'App servers', detail: 'Cache-aside client', column: 0, row: 'middle' },
-      { id: 'ring', title: 'Hash ring', detail: 'Picks the shard', column: 1, row: 'middle' },
-      { id: 'shardA', title: 'Shard A', detail: 'Primary + replica', column: 2, row: 'top' },
-      { id: 'shardB', title: 'Shard B', detail: 'Primary + replica', column: 2, row: 'middle' },
-      { id: 'shardC', title: 'Shard C', detail: 'Primary + replica', column: 2, row: 'bottom' },
+      {
+        id: 'ring',
+        title: 'Hash ring',
+        detail: 'Picks the shard',
+        column: 1,
+        row: 'middle',
+        appearsAt: 2,
+      },
+      {
+        id: 'shardA',
+        title: 'Shard A',
+        detail: 'Primary + replica',
+        column: 2,
+        row: 'top',
+        appearsAt: 2,
+      },
+      {
+        id: 'shardB',
+        title: 'Shard B',
+        detail: 'Primary + replica',
+        column: 2,
+        row: 'middle',
+        appearsAt: 2,
+      },
+      {
+        id: 'shardC',
+        title: 'Shard C',
+        detail: 'Primary + replica',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 2,
+      },
       {
         id: 'loader',
         title: 'Single flight',
         detail: 'One load per key',
         column: 3,
         row: 'middle',
+        appearsAt: 4,
       },
       { id: 'db', title: 'Database', detail: 'Source of truth', column: 4, row: 'middle' },
       {
@@ -76,6 +113,7 @@ export const distributedCache: Design = {
         detail: 'Every write, any writer',
         column: 4,
         row: 'bottom',
+        appearsAt: 7,
       },
     ],
     edges: [
@@ -91,6 +129,24 @@ export const distributedCache: Design = {
     ],
     stages: [
       {
+        title: 'Every read hits the database',
+        narration:
+          'Before any cache, each page view runs its queries against the database. Traffic grows, the same popular rows are read over and over, and the database runs out of headroom: latency climbs and some reads time out.',
+        tradeoff:
+          'Adding database replicas buys read capacity, but each replica is a full copy that is expensive to run and still slow per query. Most of those reads ask for the same small set of hot rows, which is cheaper to keep in memory than to recompute.',
+        nodes: ['app', 'db'],
+        travel: [],
+        short: 'DB overload',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '400 ms',
+          errorRate: '2%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { app: 30, db: 95 },
+      },
+      {
         title: 'Check the local cache first',
         narration:
           'Each application server keeps a tiny in-process cache for the hottest keys, with a TTL of a few seconds. Most reads of a viral item never leave the server.',
@@ -98,6 +154,15 @@ export const distributedCache: Design = {
           'A local cache removes the network hop and absorbs hot keys, but every server holds its own copy, so it costs memory and can be a few seconds stale. Keeping it small and short-lived limits both.',
         nodes: ['app', 'local'],
         travel: [['app', 'local']],
+        short: 'Local cache',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '150 ms',
+          errorRate: '0.5%',
+          alerts: ['p95Latency'],
+        },
+        load: { app: 35, local: 40, db: 70 },
       },
       {
         title: 'Find the shard with consistent hashing',
@@ -110,6 +175,15 @@ export const distributedCache: Design = {
           ['app', 'ring'],
           ['ring', 'shardB'],
         ],
+        short: 'Hash ring',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '5 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { shardA: 30, shardB: 35, shardC: 30, db: 20 },
       },
       {
         title: 'Hit: answer from memory',
@@ -122,6 +196,15 @@ export const distributedCache: Design = {
           ['ring', 'shardA'],
           ['ring', 'shardC'],
         ],
+        short: 'Cache hit',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '2 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { shardA: 30, shardB: 35, shardC: 30, db: 15 },
       },
       {
         title: 'Miss: only one request loads',
@@ -131,6 +214,15 @@ export const distributedCache: Design = {
           'Without coalescing, a popular key expiring sends thousands of identical queries to the database at once. A per-key lock adds a little latency for the waiters, and turns a stampede into a single query.',
         nodes: ['shardB', 'loader'],
         travel: [['shardB', 'loader']],
+        short: 'Single flight',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '4 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { shardB: 45, loader: 30, db: 20 },
       },
       {
         title: 'Load and fill with a jittered TTL',
@@ -140,6 +232,15 @@ export const distributedCache: Design = {
           'A TTL bounds how stale an entry can get even if an invalidation is lost; shorter TTLs mean fresher data and more misses. Jitter avoids thousands of keys written together expiring together.',
         nodes: ['loader', 'db'],
         travel: [['loader', 'db']],
+        short: 'Fill + TTL',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '4 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { loader: 30, db: 25 },
       },
       {
         title: 'Writes delete, they do not update',
@@ -149,6 +250,15 @@ export const distributedCache: Design = {
           'Updating the cache in place looks faster, but two concurrent writers can leave the older value in the cache for its whole TTL. Deleting costs one extra miss and cannot leave a wrong value behind.',
         nodes: ['app', 'db'],
         travel: [],
+        short: 'Write, delete',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '4 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { app: 35, db: 30 },
       },
       {
         title: 'A change stream catches every writer',
@@ -161,6 +271,15 @@ export const distributedCache: Design = {
           ['db', 'changes'],
           ['changes', 'shardC', 'invalidate'],
         ],
+        short: 'Change stream',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '4 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { db: 30, changes: 25, shardC: 30 },
       },
       {
         title: 'Evict when memory is full',
@@ -170,6 +289,15 @@ export const distributedCache: Design = {
           'LRU is simple and fits most read patterns. LFU keeps steadily popular keys better but adapts slower when popularity shifts. Watching the eviction rate tells you when the cache is simply too small.',
         nodes: ['shardA', 'shardB', 'shardC'],
         travel: [],
+        short: 'Evict',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '5 ms',
+          errorRate: '0.1%',
+          healthy: '3 / 3',
+        },
+        load: { shardA: 85, shardB: 92, shardC: 80 },
       },
       {
         title: 'When a shard dies',
@@ -179,6 +307,21 @@ export const distributedCache: Design = {
           'Replicas double the memory bill in exchange for fast failover. Without them, losing a node is still safe, but the database absorbs a burst of misses until the keys warm up again.',
         nodes: ['ring', 'shardA', 'shardC', 'loader'],
         travel: [],
+        short: 'Shard dies',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '50K',
+          p95Latency: '20 ms',
+          errorRate: '0.4%',
+          healthy: '2 / 3',
+          alerts: ['healthy'],
+        },
+        load: { shardA: 70, shardC: 75, loader: 50, db: 55 },
+        traffic: [
+          { edge: ['ring', 'shardB'], kind: 'failed' },
+          { edge: ['ring', 'shardA'], kind: 'health' },
+          { edge: ['ring', 'shardC'], kind: 'health' },
+        ],
       },
     ],
   },
