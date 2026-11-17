@@ -6,6 +6,7 @@ export const notificationSystem: Design = {
   summary:
     'Send push, email and SMS on behalf of every product team: urgent messages in seconds, campaigns at their own pace, user preferences respected and no visible duplicates.',
   difficulty: 'Medium',
+  minutes: 8,
   requirements: {
     functional: [
       'Product services send a notification to a user through one API, choosing a template and a priority.',
@@ -59,7 +60,7 @@ export const notificationSystem: Design = {
   highLevel: {
     label: 'Run a notification through the system',
     intro:
-      'Follow one notification from the service that asks for it to the provider that delivers it. Press play, or step through the stages to see what happens and what each choice costs.',
+      'Follow one notification from the service that asks for it to the provider that delivers it. The design grows one piece at a time, and a large campaign shows why messages need separate queues by priority. Numbers are illustrative. Press play, or step through the stages to see what happens and what each choice costs.',
     nodes: [
       {
         id: 'service',
@@ -75,20 +76,70 @@ export const notificationSystem: Design = {
         column: 1,
         row: 'middle',
       },
-      { id: 'prefs', title: 'Preferences', detail: 'Channels, opt-outs', column: 1, row: 'top' },
-      { id: 'router', title: 'Router', detail: 'Template + priority', column: 2, row: 'middle' },
-      { id: 'urgent', title: 'Urgent queue', detail: 'Codes, alerts', column: 3, row: 'top' },
-      { id: 'standard', title: 'Standard queue', detail: 'Activity', column: 3, row: 'middle' },
-      { id: 'bulk', title: 'Bulk queue', detail: 'Campaigns', column: 3, row: 'bottom' },
+      {
+        id: 'prefs',
+        title: 'Preferences',
+        detail: 'Channels, opt-outs',
+        column: 1,
+        row: 'top',
+        appearsAt: 2,
+      },
+      {
+        id: 'router',
+        title: 'Router',
+        detail: 'Template + priority',
+        column: 2,
+        row: 'middle',
+        appearsAt: 3,
+      },
+      {
+        id: 'urgent',
+        title: 'Urgent queue',
+        detail: 'Codes, alerts',
+        column: 3,
+        row: 'top',
+        appearsAt: 4,
+      },
+      {
+        id: 'standard',
+        title: 'Standard queue',
+        detail: 'Activity',
+        column: 3,
+        row: 'middle',
+        appearsAt: 3,
+      },
+      {
+        id: 'bulk',
+        title: 'Bulk queue',
+        detail: 'Campaigns',
+        column: 3,
+        row: 'bottom',
+        appearsAt: 4,
+      },
       {
         id: 'workers',
         title: 'Channel workers',
         detail: 'Push, email, SMS',
         column: 4,
         row: 'middle',
+        appearsAt: 5,
       },
-      { id: 'log', title: 'Delivery log', detail: 'Every attempt', column: 4, row: 'bottom' },
-      { id: 'providers', title: 'Providers', detail: 'Push, email, SMS', column: 5, row: 'middle' },
+      {
+        id: 'log',
+        title: 'Delivery log',
+        detail: 'Every attempt',
+        column: 4,
+        row: 'bottom',
+        appearsAt: 7,
+      },
+      {
+        id: 'providers',
+        title: 'Providers',
+        detail: 'Push, email, SMS',
+        column: 5,
+        row: 'middle',
+        appearsAt: 6,
+      },
     ],
     edges: [
       ['service', 'api'],
@@ -112,6 +163,9 @@ export const notificationSystem: Design = {
           'Answering before sending keeps callers fast and independent of provider latency. The cost is that the caller cannot know the outcome in the same call, so status is a separate endpoint or a callback.',
         nodes: ['service', 'api'],
         travel: [['service', 'api']],
+        short: 'Accept 202',
+        metrics: { users: '20M', requestsPerSecond: '5K', p95Latency: '30 ms', errorRate: '0.1%' },
+        load: { api: 25 },
       },
       {
         title: 'Deduplicate on the idempotency key',
@@ -121,6 +175,9 @@ export const notificationSystem: Design = {
           'Keeping keys for a day costs some storage, and it means a caller that times out and retries never makes the user receive the same message twice.',
         nodes: ['api'],
         travel: [],
+        short: 'Dedupe',
+        metrics: { users: '20M', requestsPerSecond: '5K', p95Latency: '30 ms', errorRate: '0.1%' },
+        load: { api: 30 },
       },
       {
         title: 'Check preferences',
@@ -130,11 +187,36 @@ export const notificationSystem: Design = {
           'Filtering early avoids rendering and queueing messages nobody will get. Preferences can change while a message waits in a queue, so regulated channels such as SMS check the opt-out again right before sending.',
         nodes: ['api', 'prefs'],
         travel: [['api', 'prefs']],
+        short: 'Preferences',
+        metrics: { users: '20M', requestsPerSecond: '5K', p95Latency: '35 ms', errorRate: '0.1%' },
+        load: { api: 30, prefs: 25 },
+      },
+      {
+        title: 'A campaign blocks sign-in codes',
+        narration:
+          'At first the router puts every message on one queue. A campaign of a million emails lands on it, and a sign-in code sent a moment later waits behind the whole campaign: users stare at an empty inbox for twenty minutes.',
+        tradeoff:
+          'More workers drain the campaign faster but do not change the order, so the code still waits behind it, and the bill grows with every campaign. The messages differ in how long they can wait, and one queue cannot express that.',
+        nodes: ['api', 'router', 'standard'],
+        travel: [
+          ['api', 'router'],
+          ['router', 'standard'],
+        ],
+        short: 'Campaign',
+        metrics: {
+          users: '20M',
+          requestsPerSecond: '50K',
+          p95Latency: '20 min',
+          errorRate: '0.1%',
+          alerts: ['p95Latency'],
+        },
+        load: { api: 60, router: 80, standard: 98 },
+        traffic: [{ edge: ['router', 'standard'], kind: 'heavy' }],
       },
       {
         title: 'Route by priority',
         narration:
-          'The router renders the template for each channel and puts the message on the queue for its priority: urgent, standard or bulk.',
+          'Priority queues join. The router renders the template for each channel and puts the message on the queue for its priority: urgent, standard or bulk.',
         tradeoff:
           'One queue is simpler, but a campaign of a million emails would sit in front of a sign-in code. Separate queues cost more infrastructure and keep urgent messages fast whatever else is happening.',
         nodes: ['router', 'urgent', 'standard', 'bulk'],
@@ -144,6 +226,10 @@ export const notificationSystem: Design = {
           ['router', 'standard'],
           ['router', 'bulk'],
         ],
+        short: 'Priority',
+        metrics: { users: '20M', requestsPerSecond: '50K', p95Latency: '3 s', errorRate: '0.1%' },
+        load: { router: 50, urgent: 10, standard: 20, bulk: 95 },
+        traffic: [{ edge: ['router', 'bulk'], kind: 'heavy' }],
       },
       {
         title: 'Workers per channel',
@@ -157,6 +243,10 @@ export const notificationSystem: Design = {
           ['standard', 'workers'],
           ['bulk', 'workers'],
         ],
+        short: 'Workers',
+        metrics: { users: '20M', requestsPerSecond: '50K', p95Latency: '3 s', errorRate: '0.1%' },
+        load: { urgent: 10, standard: 20, bulk: 80, workers: 70 },
+        traffic: [{ edge: ['bulk', 'workers'], kind: 'heavy' }],
       },
       {
         title: 'Send with retries and a circuit breaker',
@@ -166,6 +256,10 @@ export const notificationSystem: Design = {
           'Retries raise the delivery rate but risk duplicates when a provider accepted the message and the response was lost. Checking the delivery log before each send, and passing an idempotency key when the provider supports one, keeps retries safe.',
         nodes: ['workers', 'providers'],
         travel: [['workers', 'providers']],
+        short: 'Retry + breaker',
+        metrics: { users: '20M', requestsPerSecond: '50K', p95Latency: '4 s', errorRate: '0.4%' },
+        load: { workers: 60, providers: 50 },
+        traffic: [{ edge: ['workers', 'providers'], kind: 'failed' }],
       },
       {
         title: 'Record every attempt',
@@ -175,6 +269,9 @@ export const notificationSystem: Design = {
           'Logging every attempt costs storage, and it is what makes support questions answerable ("did the code go out?") and duplicates detectable. Bulk details can expire after a few weeks.',
         nodes: ['workers', 'log'],
         travel: [['workers', 'log']],
+        short: 'Delivery log',
+        metrics: { users: '20M', requestsPerSecond: '50K', p95Latency: '3 s', errorRate: '0.2%' },
+        load: { workers: 50, log: 40 },
       },
       {
         title: 'Alarm on age per queue',
@@ -184,6 +281,9 @@ export const notificationSystem: Design = {
           'Messages per second can look healthy while a backlog grows. The age of the oldest message is what users feel, and different thresholds per queue match what each kind of message promises.',
         nodes: ['urgent', 'standard', 'bulk'],
         travel: [],
+        short: 'Queue age',
+        metrics: { users: '20M', requestsPerSecond: '50K', p95Latency: '3 s', errorRate: '0.2%' },
+        load: { urgent: 5, standard: 15, bulk: 40 },
       },
     ],
   },
