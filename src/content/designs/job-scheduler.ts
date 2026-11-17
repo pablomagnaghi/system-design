@@ -6,6 +6,7 @@ export const jobScheduler: Design = {
   summary:
     'Run millions of one-off and recurring jobs at the right time: never lose one, never fire the same run twice by accident, retry what fails, and keep working when machines die.',
   difficulty: 'Medium',
+  minutes: 9,
   requirements: {
     functional: [
       'Schedule a job to run once at a given time, or on a recurring schedule (cron).',
@@ -63,7 +64,7 @@ export const jobScheduler: Design = {
   highLevel: {
     label: 'Run a job through the scheduler',
     intro:
-      'Follow one job from the moment it is scheduled until it has run, including what happens when a worker dies or the job keeps failing. Press play, or step through the stages.',
+      'Follow one job from the moment it is scheduled until it has run, including what happens when a worker dies or the job keeps failing. The design grows as it needs to: watch a midnight burst leave one dispatcher behind until partitions and leases join, then the queue, workers and history. Numbers are illustrative; P95 here is how late a job starts. Press play, or step through the stages.',
     nodes: [
       { id: 'service', title: 'Services', detail: 'Schedule a job', column: 0, row: 'middle' },
       { id: 'api', title: 'Scheduler API', detail: 'Validate + store', column: 1, row: 'middle' },
@@ -74,6 +75,7 @@ export const jobScheduler: Design = {
         detail: 'One owner per slice',
         column: 3,
         row: 'top',
+        appearsAt: 3,
       },
       {
         id: 'dispatcher',
@@ -81,17 +83,40 @@ export const jobScheduler: Design = {
         detail: 'Claim due jobs',
         column: 3,
         row: 'middle',
+        appearsAt: 2,
       },
-      { id: 'queue', title: 'Work queue', detail: 'Ready to run', column: 4, row: 'middle' },
-      { id: 'history', title: 'Run history', detail: 'Every attempt', column: 5, row: 'top' },
+      {
+        id: 'queue',
+        title: 'Work queue',
+        detail: 'Ready to run',
+        column: 4,
+        row: 'middle',
+        appearsAt: 5,
+      },
+      {
+        id: 'history',
+        title: 'Run history',
+        detail: 'Every attempt',
+        column: 5,
+        row: 'top',
+        appearsAt: 7,
+      },
       {
         id: 'workers',
         title: 'Workers',
         detail: 'Idempotent, heartbeat',
         column: 5,
         row: 'middle',
+        appearsAt: 6,
       },
-      { id: 'dlq', title: 'Dead letters', detail: 'Alert + replay', column: 5, row: 'bottom' },
+      {
+        id: 'dlq',
+        title: 'Dead letters',
+        detail: 'Alert + replay',
+        column: 5,
+        row: 'bottom',
+        appearsAt: 8,
+      },
     ],
     edges: [
       ['service', 'api'],
@@ -115,6 +140,9 @@ export const jobScheduler: Design = {
           ['service', 'api'],
           ['api', 'jobs'],
         ],
+        short: 'Schedule',
+        metrics: { requestsPerSecond: '1K', p95Latency: '1 s', errorRate: '0%' },
+        load: { api: 15, jobs: 15 },
       },
       {
         title: 'Find due jobs with an index',
@@ -124,15 +152,45 @@ export const jobScheduler: Design = {
           'Polling an indexed table every second is easy to build and keeps scheduling transactional. Delay queues or in-memory timing wheels can be more precise and scale further, but make it harder to change or cancel a job after it is scheduled.',
         nodes: ['jobs'],
         travel: [],
+        short: 'Due index',
+        metrics: { requestsPerSecond: '1K', p95Latency: '1 s', errorRate: '0%' },
+        load: { jobs: 20 },
+      },
+      {
+        title: 'Midnight leaves one dispatcher behind',
+        narration:
+          'At first a single dispatcher polls the table for due jobs. Many teams schedule daily jobs at midnight, so tens of thousands come due in the same second. The one dispatcher claims them as fast as it can, and the last jobs of the burst start minutes late.',
+        tradeoff:
+          'A bigger machine buys a little headroom, but one dispatcher is still a ceiling on throughput and a single point of failure: if it dies, nothing runs until it is replaced. The work needs to be split so several dispatchers can claim jobs at the same time without stepping on each other.',
+        nodes: ['jobs', 'dispatcher'],
+        travel: [['jobs', 'dispatcher']],
+        short: 'Midnight burst',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '4 min',
+          errorRate: '0.1%',
+          healthy: '1 / 1',
+          alerts: ['p95Latency'],
+        },
+        load: { jobs: 80, dispatcher: 100 },
       },
       {
         title: 'Split the work into partitions',
         narration:
-          'Jobs are hashed into a fixed number of partitions. Each dispatcher holds a time-limited lease on some partitions and only looks at those jobs.',
+          'More dispatchers join. Jobs are hashed into a fixed number of partitions. Each dispatcher holds a time-limited lease on some partitions and only looks at those jobs.',
         tradeoff:
           'A single leader dispatcher is simpler, but caps throughput and leaves a gap while a new leader is chosen. Partitions with leases scale by adding dispatchers, and if one dies its lease expires and another takes over its slice.',
         nodes: ['leases', 'dispatcher'],
         travel: [['leases', 'dispatcher']],
+        short: 'Partitions',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '2 s',
+          errorRate: '0.1%',
+          healthy: '4 / 4',
+        },
+        load: { leases: 20, dispatcher: 60, jobs: 55 },
+        traffic: [{ edge: ['leases', 'dispatcher'], kind: 'health' }],
       },
       {
         title: 'Claim and advance in one step',
@@ -142,6 +200,14 @@ export const jobScheduler: Design = {
           'Claiming and advancing atomically is what stops the same run from being fired twice when two dispatchers overlap. Skipping locked rows lets several dispatchers work on the same table without waiting on each other.',
         nodes: ['jobs', 'dispatcher'],
         travel: [['jobs', 'dispatcher']],
+        short: 'Claim',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '1 s',
+          errorRate: '0.1%',
+          healthy: '4 / 4',
+        },
+        load: { jobs: 55, dispatcher: 60 },
       },
       {
         title: 'Hand off to a work queue',
@@ -151,6 +217,14 @@ export const jobScheduler: Design = {
           'The queue separates deciding when to run from actually running, so slow jobs never delay scheduling. It delivers at least once, which means the job code itself must tolerate running twice.',
         nodes: ['dispatcher', 'queue'],
         travel: [['dispatcher', 'queue']],
+        short: 'Work queue',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '1 s',
+          errorRate: '0.1%',
+          healthy: '4 / 4',
+        },
+        load: { dispatcher: 55, queue: 50 },
       },
       {
         title: 'Run idempotently, with a heartbeat',
@@ -160,6 +234,15 @@ export const jobScheduler: Design = {
           'True exactly-once execution across machines needs heavy coordination. At-least-once plus idempotent jobs gets the same effect for far less. The heartbeat interval trades detection speed against overhead.',
         nodes: ['queue', 'workers'],
         travel: [['queue', 'workers']],
+        short: 'Run',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '1 s',
+          errorRate: '0.1%',
+          healthy: '4 / 4',
+        },
+        load: { queue: 50, workers: 70 },
+        traffic: [{ edge: ['queue', 'workers'], kind: 'heavy' }],
       },
       {
         title: 'Record every attempt',
@@ -169,6 +252,14 @@ export const jobScheduler: Design = {
           'Storing every attempt costs space, so old history is expired. In return, "did my job run?" always has an answer, and a job that silently never started is caught by the overdue alarm instead of by a customer.',
         nodes: ['workers', 'history'],
         travel: [['workers', 'history']],
+        short: 'History',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '1 s',
+          errorRate: '0.1%',
+          healthy: '4 / 4',
+        },
+        load: { workers: 70, history: 40 },
       },
       {
         title: 'Retry, then dead-letter',
@@ -178,6 +269,15 @@ export const jobScheduler: Design = {
           'Retrying forever hides bugs and burns resources; giving up silently loses work. A bounded number of retries with a dead-letter queue makes every permanent failure visible and recoverable.',
         nodes: ['workers', 'dlq'],
         travel: [['workers', 'dlq']],
+        short: 'Retry + DLQ',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '1 s',
+          errorRate: '0.3%',
+          healthy: '4 / 4',
+        },
+        load: { workers: 70, dlq: 15 },
+        traffic: [{ edge: ['workers', 'dlq'], kind: 'failed' }],
       },
       {
         title: 'Catch up after downtime',
@@ -187,6 +287,14 @@ export const jobScheduler: Design = {
           'There is no single right answer: a billing job must run every missed period, while a cache refresh only needs the latest one. Making it a per-job setting avoids both duplicate work and silently skipped periods.',
         nodes: ['jobs', 'dispatcher'],
         travel: [],
+        short: 'Catch up',
+        metrics: {
+          requestsPerSecond: '50K',
+          p95Latency: '30 s',
+          errorRate: '0.1%',
+          healthy: '4 / 4',
+        },
+        load: { jobs: 75, dispatcher: 85 },
       },
     ],
   },
