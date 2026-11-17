@@ -247,7 +247,7 @@ export const distributedCache: Design = {
         narration:
           'When the application changes data, it writes the database first and then deletes the cached key. The next read loads the new value.',
         tradeoff:
-          'Updating the cache in place looks faster, but two concurrent writers can leave the older value in the cache for its whole TTL. Deleting costs one extra miss and cannot leave a wrong value behind.',
+          'Updating the cache in place looks faster, but two concurrent writers can leave the older value in the cache for its whole TTL. Deleting costs one extra miss and removes the race between two writers. A slow reader can still refill an old value just after the delete, so the TTL stays as the bound, and the deep dive below covers versioned fills.',
         nodes: ['app', 'db'],
         travel: [],
         short: 'Write, delete',
