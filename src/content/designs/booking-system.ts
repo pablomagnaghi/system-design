@@ -6,6 +6,7 @@ export const bookingSystem: Design = {
   summary:
     'Let guests search and book stays without ever selling the same night twice: fast, slightly stale search; a strictly consistent claim at the moment of booking; and payments, holds and outside calendars that never leave the inventory wrong.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'Guests search available stays by place and dates.',
@@ -67,7 +68,7 @@ export const bookingSystem: Design = {
   highLevel: {
     label: 'Run a booking through the system',
     intro:
-      'Follow one guest from search to a confirmed stay, and see how the same nights stay correct when holds expire and calendars change elsewhere. Press play, or step through the stages.',
+      'Follow one guest from search to a confirmed stay. Watch two guests win the same night, then see night claims, payments, events, a hold sweeper and channel sync join as the design grows. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'guest', title: 'Guest', detail: 'Search, then book', column: 0, row: 'middle' },
       { id: 'search', title: 'Search index', detail: 'Availability cache', column: 1, row: 'top' },
@@ -78,24 +79,48 @@ export const bookingSystem: Design = {
         detail: 'Other calendars',
         column: 1,
         row: 'bottom',
+        appearsAt: 10,
       },
-      { id: 'claims', title: 'Night claims', detail: 'Unique per night', column: 2, row: 'middle' },
+      {
+        id: 'claims',
+        title: 'Night claims',
+        detail: 'Unique per night',
+        column: 2,
+        row: 'middle',
+        appearsAt: 3,
+      },
       {
         id: 'sweeper',
         title: 'Hold expiry',
         detail: 'Releases stale holds',
         column: 2,
         row: 'bottom',
+        appearsAt: 9,
       },
-      { id: 'payments', title: 'Payments', detail: 'Authorize first', column: 3, row: 'middle' },
+      {
+        id: 'payments',
+        title: 'Payments',
+        detail: 'Authorize first',
+        column: 3,
+        row: 'middle',
+        appearsAt: 5,
+      },
       {
         id: 'booking',
         title: 'Booking state',
         detail: 'held → confirmed',
         column: 4,
         row: 'middle',
+        appearsAt: 6,
       },
-      { id: 'events', title: 'Events', detail: 'Via an outbox', column: 5, row: 'middle' },
+      {
+        id: 'events',
+        title: 'Events',
+        detail: 'Via an outbox',
+        column: 5,
+        row: 'middle',
+        appearsAt: 7,
+      },
     ],
     edges: [
       ['guest', 'search'],
@@ -117,6 +142,14 @@ export const bookingSystem: Design = {
           'Searching the source of truth on every query would be exact but slow and expensive at search volume. A cache is fast and scales, at the cost of sometimes showing a stay that was just taken. That is acceptable only because the booking step checks again.',
         nodes: ['guest', 'search'],
         travel: [['guest', 'search']],
+        short: 'Search',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '20K',
+          p95Latency: '120 ms',
+          errorRate: '0.01%',
+        },
+        load: { search: 40 },
       },
       {
         title: 'Book with a key and a pinned price',
@@ -126,15 +159,45 @@ export const bookingSystem: Design = {
           'Pinning the price at booking time means the guest pays what they saw, even if dynamic pricing moved a minute later; re-pricing at confirmation would protect revenue but surprise the guest. Quotes get a short expiry so a stale price cannot be held forever.',
         nodes: ['guest', 'api'],
         travel: [['guest', 'api']],
+        short: 'Book',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '20K',
+          p95Latency: '120 ms',
+          errorRate: '0.01%',
+        },
+        load: { search: 40, api: 20 },
+      },
+      {
+        title: 'Two guests, one night',
+        narration:
+          'The first version checks the calendar and then writes the booking. On a busy holiday weekend, two guests check the same free night at the same moment, both pass the check and both get a confirmation. One of them arrives to a stay that is already taken.',
+        tradeoff:
+          'Check then write is simple and looks correct in testing, because the race needs two requests inside a few milliseconds. At holiday volume that gap is hit every day, and adding more servers makes it worse. The guard has to live where the data is written, not in the application.',
+        nodes: ['guest', 'api'],
+        travel: [['guest', 'api']],
+        short: 'Double booked',
+        metrics: {
+          users: '5M',
+          requestsPerSecond: '20K',
+          p95Latency: '120 ms',
+          errorRate: '0.4%',
+          alerts: ['errorRate'],
+        },
+        load: { api: 70 },
+        traffic: [{ edge: ['guest', 'api'], kind: 'failed' }],
       },
       {
         title: 'Claim every night atomically',
         narration:
-          'The service inserts one claim per listing and night in a single transaction. A unique constraint on listing and night means that if any night is already taken, the whole insert fails and the guest gets a clear "no longer available".',
+          'Night claims join the design. The service inserts one claim per listing and night in a single transaction. A unique constraint on listing and night means that if any night is already taken, the whole insert fails and the guest gets a clear "no longer available".',
         tradeoff:
           'Checking availability and then writing has a race between the two steps. Locking the listing works but serializes every booking for it. A unique constraint lets the database be the single judge of contention, with no extra lock service, and only the losing request pays the cost.',
         nodes: ['api', 'claims'],
         travel: [['api', 'claims']],
+        short: 'Claim nights',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { api: 25, claims: 30 },
       },
       {
         title: 'A hold, not a lock',
@@ -144,6 +207,9 @@ export const bookingSystem: Design = {
           'A hold protects the guest from losing the stay halfway through paying, and in exchange takes inventory off the market. A short expiry balances both: long enough to pay, short enough that abandoned checkouts give the nights back quickly.',
         nodes: ['claims'],
         travel: [],
+        short: 'Hold',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { claims: 30 },
       },
       {
         title: 'Authorize the payment',
@@ -153,6 +219,9 @@ export const bookingSystem: Design = {
           'Authorizing first means a failed or abandoned booking never needs a refund. Capturing immediately is simpler, but every cancellation then becomes a refund, which is slower for the guest and costs fees.',
         nodes: ['claims', 'payments'],
         travel: [['claims', 'payments']],
+        short: 'Authorize',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { claims: 30, payments: 35 },
       },
       {
         title: 'Confirm through a state machine',
@@ -162,6 +231,9 @@ export const bookingSystem: Design = {
           'Modeling the booking as a state machine with allowed transitions costs some upfront design, and it makes retries, late webhooks and timeouts harmless: a confirmed booking can never go back to held, and an expired one cannot be confirmed.',
         nodes: ['payments', 'booking'],
         travel: [['payments', 'booking']],
+        short: 'Confirm',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { payments: 35, booking: 25 },
       },
       {
         title: 'Every change emits an event',
@@ -171,6 +243,9 @@ export const bookingSystem: Design = {
           'Sending emails inside the transaction risks notifying about a booking that was rolled back. The outbox adds a table and a worker, and guarantees every committed change is announced exactly once in effect.',
         nodes: ['booking', 'events'],
         travel: [['booking', 'events']],
+        short: 'Events',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { booking: 25, events: 20 },
       },
       {
         title: 'Refresh search asynchronously',
@@ -180,6 +255,9 @@ export const bookingSystem: Design = {
           'Updating the index synchronously would make every booking slower and fail when search is down. Asynchronous updates keep booking fast and independent; the few seconds of staleness are covered by the atomic claim.',
         nodes: ['claims', 'search'],
         travel: [['claims', 'search', 'async update']],
+        short: 'Refresh search',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { claims: 30, search: 40 },
       },
       {
         title: 'Expired holds give nights back',
@@ -189,6 +267,9 @@ export const bookingSystem: Design = {
           'A sweeper alone leaves nights blocked until it runs; checking expiry on every read alone leaves old rows behind. Doing both keeps inventory correct immediately and the table clean over time.',
         nodes: ['sweeper', 'claims'],
         travel: [['sweeper', 'claims']],
+        short: 'Expire holds',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { sweeper: 30, claims: 35 },
       },
       {
         title: 'Calendars changed elsewhere',
@@ -198,6 +279,10 @@ export const bookingSystem: Design = {
           'When you do not own all the inventory, a short window where two platforms sell the same night is unavoidable. Syncing often narrows the window, and a written policy (who keeps the stay, how the other guest is rebooked and compensated) handles the rare conflict instead of pretending it cannot happen.',
         nodes: ['channels', 'claims'],
         travel: [['channels', 'claims']],
+        short: 'Channel sync',
+        metrics: { users: '5M', requestsPerSecond: '20K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { channels: 50, claims: 40 },
+        traffic: [{ edge: ['channels', 'claims'], kind: 'heavy' }],
       },
     ],
   },
