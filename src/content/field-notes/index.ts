@@ -1,4 +1,5 @@
 import type { FieldNote } from '../types';
+import { metaZgateway } from './meta-zgateway';
 import { spotifyDataLake } from './spotify-data-lake';
 import { figmaMultiplayer } from './figma-multiplayer';
 import { discordMessageStorage } from './discord-message-storage';
@@ -12,6 +13,7 @@ export const fieldNotes: readonly FieldNote[] = [
   discordMessageStorage,
   figmaMultiplayer,
   spotifyDataLake,
+  metaZgateway,
 ];
 
 export function getFieldNote(slug: string): FieldNote | undefined {
