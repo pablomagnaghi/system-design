@@ -275,7 +275,7 @@ export const postSearch: Design = {
       {
         title: 'Age old posts into a cold index',
         narration:
-          'Most searches only want recent posts. Shards keep recent weeks in memory and periodically move older segments into a cold index on cheaper storage. The broker searches the cold index only when the hot results do not fill the page.',
+          'Most searches only want recent posts. Shards keep recent weeks in memory and periodically move older segments into a cold index on cheaper storage. For the newest-first sort, the broker searches the cold index only when the hot results do not fill the page. Sorting by likes has to include the cold index, because an old post can outrank recent ones.',
         tradeoff:
           'Keeping everything in memory would be fastest and very expensive for years of posts that are rarely read. Tiering costs a slower path for deep or old searches, which is an acceptable price for the rare user who scrolls that far back.',
         nodes: ['shards', 'cold', 'broker'],
