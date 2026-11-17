@@ -22,6 +22,22 @@ Live at https://systems.pablomagnaghi.com. Read this file before doing anything.
 - Numbers are illustrative orders of magnitude, never measured results.
 - English only, plain and concise. No em dashes in prose.
 
+### Precision rules (from the correctness audit)
+
+- **Delivery:** outboxes, CDC and queue consumers are at-least-once. Write "at least once, made
+  harmless by <key>". Never write a bare "exactly once" or "sent once"; "exactly-once effect" is
+  fine when the dedup key is named.
+- **Dual writes:** a commit followed by a separate publish or enqueue can lose the second step.
+  Use an outbox, a sweeper with a deadline or a replay, and never claim "never lost" over one.
+- **Locks and leases:** a single owner needs a fencing token or epoch checked by the store, or a
+  conditional write. A TTL lock alone is an optimization, not a guarantee.
+- **Durability:** "never lost" must state its condition (acknowledged after a durable or
+  synchronously replicated write) or the accepted loss window.
+- **Caches:** a fill can race an invalidation. Say so and bound it with a TTL or versioned fills.
+- **Numbers:** requirement figures must agree with the stage metrics and with each other.
+- A design's depth sections (`guarantees`, `failures`, `capacity`, `evolution`) follow the same
+  rules and must not contradict its walkthrough or deep dives.
+
 ### Field notes (`src/content/field-notes/**`)
 
 Field notes retell how a real company solved a real problem, based on that company's own public
