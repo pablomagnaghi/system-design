@@ -6,6 +6,7 @@ export const rateLimiter: Design = {
   summary:
     'Cap how many requests each client can make, across a fleet of gateways, without adding noticeable latency or becoming a single point of failure.',
   difficulty: 'Medium',
+  minutes: 8,
   requirements: {
     functional: [
       'Limit requests per client, identified by API key, user id or IP address.',
@@ -53,20 +54,42 @@ export const rateLimiter: Design = {
   highLevel: {
     label: 'Run a request through the limiter',
     intro:
-      'Follow one request from the client to either the backend or a 429. Press play, or step through the stages to see what happens and what each choice costs.',
+      'Start with one client flooding the backend, then watch the limiter, its rules and a shared counter join the gateway, and see what happens when the counter store fails. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'client', title: 'Client', detail: 'Request + API key', column: 0, row: 'middle' },
       { id: 'gateway', title: 'API gateway', detail: 'Every request', column: 1, row: 'middle' },
-      { id: 'rules', title: 'Rules', detail: 'Cached in memory', column: 2, row: 'top' },
-      { id: 'limiter', title: 'Limiter', detail: 'Gateway middleware', column: 2, row: 'middle' },
+      {
+        id: 'rules',
+        title: 'Rules',
+        detail: 'Cached in memory',
+        column: 2,
+        row: 'top',
+        appearsAt: 3,
+      },
+      {
+        id: 'limiter',
+        title: 'Limiter',
+        detail: 'Gateway middleware',
+        column: 2,
+        row: 'middle',
+        appearsAt: 2,
+      },
       {
         id: 'store',
         title: 'Redis cluster',
         detail: 'Buckets by client',
         column: 3,
         row: 'bottom',
+        appearsAt: 4,
       },
-      { id: 'reject', title: '429 response', detail: 'With Retry-After', column: 3, row: 'top' },
+      {
+        id: 'reject',
+        title: '429 response',
+        detail: 'With Retry-After',
+        column: 3,
+        row: 'top',
+        appearsAt: 7,
+      },
       { id: 'backend', title: 'Backend', detail: 'Only allowed traffic', column: 4, row: 'middle' },
     ],
     edges: [
@@ -79,6 +102,24 @@ export const rateLimiter: Design = {
     ],
     stages: [
       {
+        title: 'One client floods the backend',
+        narration:
+          'Before any limit, the gateway forwards everything. One client with a broken retry loop sends thousands of requests a second, the backend runs out of capacity and every other client sees slow pages and errors.',
+        tradeoff:
+          'Adding backend servers absorbs the spike for a while, but the bill then grows with the worst client instead of real demand, and a bigger loop fills the new servers too. Capping each client at the front door protects everyone else for a fraction of the cost.',
+        nodes: ['client', 'gateway', 'backend'],
+        travel: [['client', 'gateway']],
+        short: 'Flood',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '2.5 s',
+          errorRate: '8%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { gateway: 60, backend: 98 },
+      },
+      {
         title: 'Identify the client',
         narration:
           'The request arrives with an API key. The gateway picks the most specific identity it has: the API key, then the user id, then the IP address for anonymous traffic.',
@@ -86,15 +127,27 @@ export const rateLimiter: Design = {
           'IP addresses are always there but are shared by offices and mobile carriers, so one noisy user can throttle many. API keys are precise but only exist for authenticated traffic. Using the best identity available gets precision where possible and coverage everywhere else.',
         nodes: ['client', 'gateway'],
         travel: [['client', 'gateway']],
+        short: 'Identify',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '2.5 s',
+          errorRate: '8%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { gateway: 60, backend: 98 },
       },
       {
         title: 'Limit at the gateway',
         narration:
-          'The check runs as middleware inside the gateway, so every request passes through it before reaching any service.',
+          'A limiter joins the gateway. The check runs as middleware, so every request passes through it before reaching any service, and the flooding client is cut down to its share.',
         tradeoff:
           'At the gateway, one implementation protects every service and nothing downstream has to change. Limiting inside each service would know more about the request but duplicates logic, and a separate limiter service would add a network hop to every request.',
         nodes: ['gateway', 'limiter'],
         travel: [['gateway', 'limiter']],
+        short: 'Gateway limit',
+        metrics: { users: '1M', requestsPerSecond: '150K', p95Latency: '90 ms', errorRate: '0.2%' },
+        load: { gateway: 60, limiter: 30, backend: 55 },
       },
       {
         title: 'Load the rules',
@@ -104,6 +157,9 @@ export const rateLimiter: Design = {
           'Reading rules from memory adds no latency, but a change takes a few seconds to reach every gateway. Reading them on every request would always be fresh and would put another dependency in the hot path.',
         nodes: ['rules', 'limiter'],
         travel: [['rules', 'limiter']],
+        short: 'Rules',
+        metrics: { users: '1M', requestsPerSecond: '150K', p95Latency: '90 ms', errorRate: '0.2%' },
+        load: { rules: 5, limiter: 30 },
       },
       {
         title: 'Take a token, atomically',
@@ -113,6 +169,15 @@ export const rateLimiter: Design = {
           'A shared store gives one consistent count across every gateway for about a millisecond per request. Counting in each gateway memory would be faster, but each instance would only see its share of the traffic and a client could exceed the limit by the number of instances.',
         nodes: ['limiter', 'store'],
         travel: [['limiter', 'store']],
+        short: 'Take token',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '91 ms',
+          errorRate: '0.1%',
+          healthy: '6 / 6',
+        },
+        load: { limiter: 35, store: 40 },
       },
       {
         title: 'Why a token bucket',
@@ -122,6 +187,15 @@ export const rateLimiter: Design = {
           'A fixed window is simplest but lets a client send double the limit around the window boundary. A sliding log is exact but stores every timestamp. A token bucket needs two numbers per client and allows short, bounded bursts, which matches how real clients behave.',
         nodes: ['store'],
         travel: [],
+        short: 'Token bucket',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '91 ms',
+          errorRate: '0.1%',
+          healthy: '6 / 6',
+        },
+        load: { store: 40 },
       },
       {
         title: 'Allowed: forward the request',
@@ -131,6 +205,15 @@ export const rateLimiter: Design = {
           'Returning the headers on every response costs a few bytes, and lets well-behaved clients pace themselves instead of discovering the limit by hitting it.',
         nodes: ['limiter', 'backend'],
         travel: [['limiter', 'backend']],
+        short: 'Allowed',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '91 ms',
+          errorRate: '0.1%',
+          healthy: '6 / 6',
+        },
+        load: { limiter: 35, store: 40, backend: 50 },
       },
       {
         title: 'Over the limit: 429',
@@ -140,6 +223,15 @@ export const rateLimiter: Design = {
           'Rejecting fast protects the backend but pushes work back to the client. Telling it exactly when to retry, and documenting jittered retries, avoids a crowd of clients retrying at the same instant.',
         nodes: ['limiter', 'reject'],
         travel: [['limiter', 'reject']],
+        short: '429',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '91 ms',
+          errorRate: '0.1%',
+          healthy: '6 / 6',
+        },
+        load: { limiter: 35, reject: 25, backend: 50 },
       },
       {
         title: 'When Redis is down',
@@ -149,6 +241,17 @@ export const rateLimiter: Design = {
           'Failing open keeps the product available but removes protection for a while. Failing closed protects the backends but turns a cache outage into a full outage. For most APIs, availability wins and the local fallback limits the damage.',
         nodes: ['limiter', 'store', 'backend'],
         travel: [['limiter', 'backend']],
+        short: 'Redis down',
+        metrics: {
+          users: '1M',
+          requestsPerSecond: '150K',
+          p95Latency: '110 ms',
+          errorRate: '0.1%',
+          healthy: '0 / 6',
+          alerts: ['healthy'],
+        },
+        load: { limiter: 40, store: 0, backend: 65 },
+        traffic: [{ edge: ['limiter', 'store'], kind: 'failed' }],
       },
     ],
   },
