@@ -20,7 +20,7 @@ export const discordMessageStorage: FieldNote = {
   walkthrough: {
     label: 'From a struggling Cassandra cluster to ScyllaDB behind data services',
     intro:
-      "Follow a message read from the API to the store, watch a busy channel overload Cassandra, then see the data services and the new ScyllaDB cluster join the design. Latency and node counts are quoted from Discord's post; load bars are approximate. Press play, or step through the stages.",
+      "Follow a message read from the API to the store, watch a busy channel overload Cassandra, then see the data services and the new ScyllaDB cluster join the design. The metrics bar shows node counts, disk per node and p99 latency as quoted from Discord's post: red while Cassandra serves messages, green once ScyllaDB does. Load bars are approximate. Press play, or step through the stages.",
     nodes: [
       {
         id: 'clients',
@@ -93,6 +93,12 @@ export const discordMessageStorage: FieldNote = {
           ['api', 'cassandra', 'quorum'],
         ],
         short: 'Before',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+          ],
+        },
         load: { api: 30, cassandra: 45 },
       },
       {
@@ -104,6 +110,12 @@ export const discordMessageStorage: FieldNote = {
         nodes: ['api', 'cassandra'],
         travel: [['api', 'cassandra', 'quorum']],
         short: 'Costly reads',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+          ],
+        },
         load: { api: 35, cassandra: 75 },
       },
       {
@@ -118,6 +130,14 @@ export const discordMessageStorage: FieldNote = {
           ['api', 'cassandra', 'quorum'],
         ],
         short: 'Hot partition',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+          ],
+        },
         load: { api: 70, cassandra: 98 },
         traffic: [
           { edge: ['clients', 'api'], kind: 'heavy' },
@@ -136,6 +156,14 @@ export const discordMessageStorage: FieldNote = {
           ['data', 'cassandra'],
         ],
         short: 'Data services',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+          ],
+        },
         load: { api: 60, data: 40, cassandra: 90 },
         traffic: [{ edge: ['api', 'data'], kind: 'heavy' }],
       },
@@ -151,6 +179,14 @@ export const discordMessageStorage: FieldNote = {
           ['data', 'cassandra'],
         ],
         short: 'Coalescing',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+          ],
+        },
         load: { api: 55, data: 50, cassandra: 75 },
         traffic: [{ edge: ['api', 'data'], kind: 'heavy' }],
       },
@@ -166,6 +202,14 @@ export const discordMessageStorage: FieldNote = {
           ['data', 'cassandra'],
         ],
         short: 'Hash routing',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+          ],
+        },
         load: { api: 50, data: 55, cassandra: 65 },
       },
       {
@@ -177,6 +221,14 @@ export const discordMessageStorage: FieldNote = {
         nodes: ['data', 'scylla'],
         travel: [['data', 'cassandra']],
         short: 'ScyllaDB',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+          ],
+        },
         load: { data: 50, cassandra: 65, scylla: 10 },
       },
       {
@@ -192,6 +244,15 @@ export const discordMessageStorage: FieldNote = {
           ['migrator', 'scylla', 'write'],
         ],
         short: 'Migration',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+            { label: 'Migration peak', value: '3.2M msg/s' },
+          ],
+        },
         load: { data: 50, cassandra: 85, migrator: 90, scylla: 70 },
         traffic: [
           { edge: ['cassandra', 'migrator'], kind: 'heavy' },
@@ -210,6 +271,14 @@ export const discordMessageStorage: FieldNote = {
           ['data', 'scylla'],
         ],
         short: 'Cutover',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '177' },
+            { label: 'Disk per node', value: '4 TB avg' },
+            { label: 'p99 read (history)', value: '40-125 ms', alert: true },
+            { label: 'p99 insert', value: '5-70 ms', alert: true },
+          ],
+        },
         load: { data: 55, cassandra: 60, scylla: 40 },
       },
       {
@@ -225,6 +294,14 @@ export const discordMessageStorage: FieldNote = {
           ['data', 'scylla'],
         ],
         short: 'After',
+        metrics: {
+          custom: [
+            { label: 'Message DB nodes', value: '72' },
+            { label: 'Disk per node', value: '9 TB' },
+            { label: 'p99 read (history)', value: '15 ms' },
+            { label: 'p99 insert', value: '5 ms steady' },
+          ],
+        },
         load: { api: 45, data: 45, scylla: 40 },
         traffic: [{ edge: ['clients', 'api'], kind: 'heavy' }],
       },
