@@ -138,3 +138,49 @@ describe('field notes', () => {
       for (const slug of note.related ?? []) expect(slugs).toContain(slug);
   });
 });
+
+// The depth sections are optional, but when a design has one it must be complete enough to teach.
+describe('design depth sections', () => {
+  const filled = (text: string) => text.trim().length > 20;
+
+  it('state guarantees with their assumptions and limits', () => {
+    for (const { slug, guarantees } of designs) {
+      if (!guarantees) continue;
+      expect(guarantees.provides.length, slug).toBeGreaterThan(0);
+      for (const g of guarantees.provides)
+        expect(filled(g.promise), `${slug}: ${g.property}`).toBe(true);
+      expect(guarantees.assumes.length, slug).toBeGreaterThan(0);
+      expect(guarantees.doesNotGuarantee.length, slug).toBeGreaterThan(0);
+    }
+  });
+
+  it('describe each failure with impact, detection and recovery', () => {
+    for (const { slug, failures } of designs) {
+      for (const f of failures ?? []) {
+        for (const part of [f.scenario, f.impact, f.detection, f.recovery])
+          expect(filled(part), `${slug}: ${f.scenario}`).toBe(true);
+      }
+    }
+  });
+
+  it('show the math behind every capacity estimate and what it implies', () => {
+    for (const { slug, capacity } of designs) {
+      if (!capacity) continue;
+      expect(capacity.assumptions.length, slug).toBeGreaterThan(0);
+      expect(capacity.estimates.length, slug).toBeGreaterThan(0);
+      for (const e of capacity.estimates)
+        expect(e.math.trim().length, `${slug}: ${e.label}`).toBeGreaterThan(0);
+      expect(capacity.implications.length, slug).toBeGreaterThan(0);
+    }
+  });
+
+  it('explain how the design evolves', () => {
+    for (const { slug, evolution } of designs) {
+      if (!evolution) continue;
+      expect(filled(evolution.mvp), slug).toBe(true);
+      expect(filled(evolution.firstBottleneck), slug).toBe(true);
+      expect(evolution.atScale.length, slug).toBeGreaterThan(0);
+      expect(evolution.avoided.length, slug).toBeGreaterThan(0);
+    }
+  });
+});

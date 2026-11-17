@@ -125,6 +125,68 @@ export interface Design {
   readonly deepDives: readonly DeepDive[];
   /** A short closing line that summarizes the design in an interview. */
   readonly wrapUp: string;
+  /** What the design promises, what those promises rest on, and what it does not promise. */
+  readonly guarantees?: Guarantees;
+  /** How the design fails and recovers, beyond the happy path. */
+  readonly failures?: readonly FailureScenario[];
+  /** Back-of-the-envelope numbers and the decisions they drive. Illustrative, never measured. */
+  readonly capacity?: Capacity;
+  /** How the design should change as scale and reliability needs grow. */
+  readonly evolution?: Evolution;
+}
+
+/** One guarantee, stated precisely (e.g. "at-least-once delivery, effectively-once effect"). */
+export interface Guarantee {
+  /** The property, e.g. "Delivery", "Read consistency", "Durability". */
+  readonly property: string;
+  /** What is guaranteed, in plain words. */
+  readonly promise: string;
+}
+
+export interface Guarantees {
+  readonly provides: readonly Guarantee[];
+  /** Conditions the guarantees depend on (idempotent consumers, a quorum, synchronized clocks...). */
+  readonly assumes: readonly string[];
+  /** What the design explicitly does not guarantee. */
+  readonly doesNotGuarantee: readonly string[];
+}
+
+export interface FailureScenario {
+  /** What fails, e.g. "A worker crashes after committing but before acknowledging the message". */
+  readonly scenario: string;
+  /** What users or data experience while it lasts. */
+  readonly impact: string;
+  /** How the failure is noticed: an alarm, a metric, a reconciliation job. */
+  readonly detection: string;
+  /** How the system recovers, and what state it is left in. */
+  readonly recovery: string;
+}
+
+/** A single estimate, with the arithmetic that produced it. */
+export interface Estimate {
+  readonly label: string;
+  /** Display value, e.g. "~12K QPS". */
+  readonly value: string;
+  /** How it was derived, e.g. "100M reads/day ÷ 86,400 s × 10 peak factor". */
+  readonly math: string;
+}
+
+export interface Capacity {
+  readonly assumptions: readonly string[];
+  readonly estimates: readonly Estimate[];
+  /** The architectural decisions these numbers force, e.g. "reads dominate 100:1, so cache in front". */
+  readonly implications: readonly string[];
+}
+
+export interface Evolution {
+  /** What is deliberately simple in the first version. */
+  readonly mvp: string;
+  /** What breaks or changes first at 10x or 100x. */
+  readonly atScale: readonly string[];
+  /** The component that becomes the bottleneck first, and why. */
+  readonly firstBottleneck: string;
+  /** Complexity that was avoided on purpose, and when it would be worth adding. */
+  readonly avoided: readonly string[];
 }
 
 /**
