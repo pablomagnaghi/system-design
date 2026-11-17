@@ -6,6 +6,7 @@ export const fileSync: Design = {
   summary:
     'Keep a folder in sync across every device a user owns: upload only the parts of a file that changed, store each chunk once, tell other devices within seconds, and never silently lose an edit when two devices change the same file.',
   difficulty: 'Hard',
+  minutes: 10,
   requirements: {
     functional: [
       'Users upload and download files of any size, up to tens of gigabytes.',
@@ -72,7 +73,7 @@ export const fileSync: Design = {
   highLevel: {
     label: 'Sync one edit across devices',
     intro:
-      'Follow one edited file from the laptop where it changed to a phone that has it a few seconds later, including what happens when both changed it. Press play, or step through the stages.',
+      'Follow one edited file from the laptop where it changed to a phone that has it a few seconds later, including what happens when both changed it. The design grows as it needs to: watch polling devices overload the servers until a notifier joins, then a CDN and a cleanup job. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       {
         id: 'client',
@@ -81,14 +82,29 @@ export const fileSync: Design = {
         column: 0,
         row: 'middle',
       },
-      { id: 'blobs', title: 'Blob storage', detail: 'Chunks by hash', column: 1, row: 'top' },
-      { id: 'api', title: 'Sync API', detail: 'Auth, upload URLs', column: 1, row: 'middle' },
+      {
+        id: 'blobs',
+        title: 'Blob storage',
+        detail: 'Chunks by hash',
+        column: 1,
+        row: 'top',
+        appearsAt: 2,
+      },
+      {
+        id: 'api',
+        title: 'Sync API',
+        detail: 'Auth, upload URLs',
+        column: 1,
+        row: 'middle',
+        appearsAt: 1,
+      },
       {
         id: 'metadata',
         title: 'Metadata DB',
         detail: 'Files and versions',
         column: 2,
         row: 'middle',
+        appearsAt: 1,
       },
       {
         id: 'gc',
@@ -96,6 +112,7 @@ export const fileSync: Design = {
         detail: 'Old versions, orphans',
         column: 2,
         row: 'bottom',
+        appearsAt: 9,
       },
       {
         id: 'changelog',
@@ -103,15 +120,24 @@ export const fileSync: Design = {
         detail: 'Per namespace, ordered',
         column: 3,
         row: 'middle',
+        appearsAt: 5,
       },
-      { id: 'notify', title: 'Notifier', detail: 'Long poll per device', column: 4, row: 'middle' },
-      { id: 'cdn', title: 'CDN', detail: 'Popular chunks', column: 4, row: 'top' },
+      {
+        id: 'notify',
+        title: 'Notifier',
+        detail: 'Long poll per device',
+        column: 4,
+        row: 'middle',
+        appearsAt: 7,
+      },
+      { id: 'cdn', title: 'CDN', detail: 'Popular chunks', column: 4, row: 'top', appearsAt: 8 },
       {
         id: 'device',
         title: 'Other devices',
         detail: 'Pull from cursor',
         column: 5,
         row: 'middle',
+        appearsAt: 6,
       },
     ],
     edges: [
@@ -134,6 +160,9 @@ export const fileSync: Design = {
           'Uploading the whole file on every save is simple, but a one-line change to a large file would cost the full upload. Chunking costs client CPU and a manifest per version, and in exchange only changed chunks travel and uploads can resume chunk by chunk.',
         nodes: ['client'],
         travel: [],
+        short: 'Chunk',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0%' },
+        load: { client: 30 },
       },
       {
         title: 'Ask which chunks are missing',
@@ -146,6 +175,9 @@ export const fileSync: Design = {
           ['client', 'api'],
           ['api', 'metadata'],
         ],
+        short: 'Missing chunks',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0%' },
+        load: { api: 15, metadata: 15 },
       },
       {
         title: 'Upload straight to blob storage',
@@ -155,6 +187,10 @@ export const fileSync: Design = {
           'Streaming file bytes through the API servers would make them a bandwidth bottleneck and tie up connections for minutes. Signed URLs keep the API on small metadata calls; the cost is that the client must finish uploads before it commits, and orphaned chunks need cleaning up later.',
         nodes: ['client', 'blobs'],
         travel: [['client', 'blobs', 'chunks']],
+        short: 'Upload',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { client: 40, blobs: 30, api: 15 },
+        traffic: [{ edge: ['client', 'blobs'], kind: 'heavy' }],
       },
       {
         title: 'Commit against a base version',
@@ -167,6 +203,9 @@ export const fileSync: Design = {
           ['client', 'api'],
           ['api', 'metadata'],
         ],
+        short: 'Commit',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { api: 15, metadata: 20 },
       },
       {
         title: 'Conflicts keep both copies',
@@ -176,6 +215,9 @@ export const fileSync: Design = {
           'Last writer wins would be invisible to the user and would silently throw one edit away. Merging automatically only works for formats the system understands. A conflicted copy is clumsy but never loses data, which matters more for arbitrary files.',
         nodes: ['metadata'],
         travel: [],
+        short: 'Conflict',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { metadata: 20 },
       },
       {
         title: 'Append to the change log',
@@ -185,11 +227,33 @@ export const fileSync: Design = {
           'A per-namespace log with a cursor turns sync into "give me everything after N", which is easy to resume after days offline. It needs ordering within a namespace, which is why the metadata is partitioned by namespace rather than by file.',
         nodes: ['metadata', 'changelog'],
         travel: [['metadata', 'changelog']],
+        short: 'Change log',
+        metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '80 ms', errorRate: '0.1%' },
+        load: { metadata: 25, changelog: 15 },
+      },
+      {
+        title: 'Every device polls for news',
+        narration:
+          'With no way to hear about changes, every other device asks the sync API every few seconds whether its namespace moved. Users grow to tens of millions, almost all of them idle, and the polls swamp the API and the metadata database: commits slow down and some time out.',
+        tradeoff:
+          'Polling less often cuts the load but makes sync feel slow, and nearly every poll still answers "nothing new". The work is wasted on devices that have nothing to fetch, which calls for a way to tell a device only when its namespace actually changes.',
+        nodes: ['device', 'api', 'metadata'],
+        travel: [['api', 'metadata']],
+        short: 'Polling storm',
+        metrics: {
+          users: '20M',
+          requestsPerSecond: '2M',
+          p95Latency: '2.5 s',
+          errorRate: '4%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { api: 95, metadata: 97, changelog: 20 },
+        traffic: [{ edge: ['client', 'api'], kind: 'failed' }],
       },
       {
         title: 'Wake up the other devices',
         narration:
-          'Each online device holds a long poll on the notifier. When the namespace log moves, the notifier answers and the device reads the new entries from its cursor.',
+          'A notifier joins. Each online device holds a long poll on it, and only when the namespace log moves does the notifier answer, so the device reads the new entries from its cursor.',
         tradeoff:
           'Frequent polling from millions of idle devices wastes requests; pushing full changes over a socket couples delivery to state. A long poll that only says "there is news" is cheap, and the cursor read stays the single way to get changes, online or after a week away.',
         nodes: ['changelog', 'notify', 'device'],
@@ -197,6 +261,14 @@ export const fileSync: Design = {
           ['changelog', 'notify'],
           ['notify', 'device', 'changes'],
         ],
+        short: 'Notifier',
+        metrics: {
+          users: '20M',
+          requestsPerSecond: '40K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { api: 30, metadata: 35, changelog: 30, notify: 45, device: 10 },
       },
       {
         title: 'Download only what is missing',
@@ -209,6 +281,15 @@ export const fileSync: Design = {
           ['blobs', 'cdn'],
           ['cdn', 'device', 'chunks'],
         ],
+        short: 'Download',
+        metrics: {
+          users: '20M',
+          requestsPerSecond: '40K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { blobs: 25, cdn: 50, device: 20 },
+        traffic: [{ edge: ['cdn', 'device'], kind: 'heavy' }],
       },
       {
         title: 'Keep history, collect garbage',
@@ -218,6 +299,15 @@ export const fileSync: Design = {
           'Deleting chunks as soon as a version goes away is risky, because a new upload may be about to reference the same hash. A delayed, reference-counted sweep with a grace period is slower to reclaim space, and it never deletes a chunk that is still needed.',
         nodes: ['metadata', 'gc'],
         travel: [['metadata', 'gc']],
+        short: 'History + GC',
+        metrics: {
+          users: '20M',
+          requestsPerSecond: '40K',
+          p95Latency: '120 ms',
+          errorRate: '0.1%',
+        },
+        load: { metadata: 40, gc: 35 },
+        traffic: [{ edge: ['metadata', 'gc'], kind: 'heavy' }],
       },
     ],
   },
