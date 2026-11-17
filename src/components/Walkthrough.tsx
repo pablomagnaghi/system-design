@@ -8,6 +8,7 @@ import {
   percentY,
   VIEW,
 } from '../lib/walkthrough-layout';
+import { hasMetrics, loadLevel, metricItems } from '../lib/walkthrough-metrics';
 import { initPlayer, playerReducer, playLabel } from '../lib/walkthrough-player';
 import styles from './Walkthrough.module.css';
 
@@ -55,6 +56,9 @@ export default function Walkthrough({ walkthrough }: Props) {
   const done = useMemo(() => reached(stages, state.stage - 1), [stages, state.stage]);
   const activeNodes = new Set(current?.nodes);
   const activeEdges = new Set(current?.travel.map(edgeKey));
+  const showMetrics = useMemo(() => hasMetrics(stages), [stages]);
+  const metrics = metricItems(current?.metrics, stages[state.stage - 1]?.metrics);
+  const labelled = stages.some((stage) => stage.short);
 
   // Advance to the next stage while playing.
   useEffect(() => {
@@ -109,10 +113,17 @@ export default function Walkthrough({ walkthrough }: Props) {
     return () => cancelAnimationFrame(frame);
   }, [current]);
 
-  const nodeClass = (id: string): string =>
-    [styles.node, activeNodes.has(id) && styles.active, done.nodes.has(id) && styles.done]
+  const nodeClass = (id: string): string => {
+    const load = current?.load?.[id];
+    return [
+      styles.node,
+      activeNodes.has(id) && styles.active,
+      done.nodes.has(id) && styles.done,
+      load !== undefined && loadLevel(load) === 'hot' && styles.hot,
+    ]
       .filter(Boolean)
       .join(' ');
+  };
   const edgeClass = (key: string): string =>
     [styles.edge, activeEdges.has(key) && styles.edgeActive, done.edges.has(key) && styles.edgeDone]
       .filter(Boolean)
@@ -120,6 +131,23 @@ export default function Walkthrough({ walkthrough }: Props) {
 
   return (
     <figure className={styles.walkthrough} aria-label={label}>
+      {showMetrics && (
+        <dl className={styles.metrics} aria-label="System metrics">
+          {metrics.length > 0 ? (
+            metrics.map((metric) => (
+              <div key={metric.key} className={styles[metric.status]}>
+                <dt>{metric.label}</dt>
+                <dd>{metric.value}</dd>
+              </div>
+            ))
+          ) : (
+            <div className={styles.normal}>
+              <dt>Metrics</dt>
+              <dd>Press play</dd>
+            </div>
+          )}
+        </dl>
+      )}
       <div ref={scrollerRef} className={styles.scroller}>
         <div className={styles.canvas} style={{ aspectRatio: `${VIEW.width} / ${VIEW.height}` }}>
           <svg
@@ -176,6 +204,9 @@ export default function Walkthrough({ walkthrough }: Props) {
               >
                 <strong>{node.title}</strong>
                 <span>{node.detail}</span>
+                {current?.load?.[node.id] !== undefined && (
+                  <LoadBar percent={current.load[node.id] ?? 0} />
+                )}
               </div>
             );
           })}
@@ -219,22 +250,47 @@ export default function Walkthrough({ walkthrough }: Props) {
           >
             →
           </button>
-          <ol className={styles.steps} aria-label="Stages">
+          {!labelled && (
+            <ol className={styles.steps} aria-label="Stages">
+              {stages.map((stage, i) => (
+                <li key={stage.title}>
+                  <button
+                    type="button"
+                    className={i === state.stage ? styles.stepCurrent : undefined}
+                    aria-current={i === state.stage ? 'step' : undefined}
+                    aria-label={`Stage ${i + 1}: ${stage.title}`}
+                    onClick={() => dispatch({ type: 'goto', stage: i })}
+                  >
+                    {i + 1}
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+
+        {labelled && (
+          <ol className={styles.timeline} aria-label="Stages">
             {stages.map((stage, i) => (
-              <li key={stage.title}>
+              <li
+                key={stage.title}
+                className={
+                  i === state.stage ? styles.stepCurrent : i < state.stage ? styles.stepDone : ''
+                }
+              >
                 <button
                   type="button"
-                  className={i === state.stage ? styles.stepCurrent : undefined}
                   aria-current={i === state.stage ? 'step' : undefined}
                   aria-label={`Stage ${i + 1}: ${stage.title}`}
                   onClick={() => dispatch({ type: 'goto', stage: i })}
                 >
-                  {i + 1}
+                  <span className={styles.stepNumber}>{i + 1}</span>
+                  <span className={styles.stepLabel}>{stage.short ?? stage.title}</span>
                 </button>
               </li>
             ))}
           </ol>
-        </div>
+        )}
 
         <div className={styles.narration} aria-live="polite">
           {current ? (
@@ -253,5 +309,18 @@ export default function Walkthrough({ walkthrough }: Props) {
         </div>
       </figcaption>
     </figure>
+  );
+}
+
+/** A small bar on a node showing how busy it is in the current stage. */
+function LoadBar({ percent }: { percent: number }) {
+  const level = loadLevel(percent);
+  return (
+    <span className={styles.load} aria-label={`Load ${percent}%`}>
+      <span className={styles.loadTrack}>
+        <span className={`${styles.loadFill} ${styles[level]}`} style={{ width: `${percent}%` }} />
+      </span>
+      <span className={styles.loadValue}>{percent}%</span>
+    </span>
   );
 }
