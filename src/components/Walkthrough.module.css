@@ -226,6 +226,75 @@
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--surface);
   pointer-events: none;
+  /* Hidden until the first frame places it, so it never flashes in a corner. */
+  opacity: 0;
+}
+
+/* Packet kinds: same shapes on the canvas and in the legend. */
+.dotRequest {
+  background: var(--accent);
+}
+
+.dotHeavy {
+  width: 15px;
+  height: 15px;
+  margin: -7.5px 0 0 -7.5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--danger) 55%, #e8a33d);
+}
+
+.dotHealth {
+  background: var(--surface);
+  border: 2.5px solid var(--success);
+}
+
+.dotFailed {
+  background: var(--danger);
+}
+
+/* A node that joins the design later scales in. */
+.enter {
+  animation: enter 450ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  list-style: none;
+  margin: 0;
+  padding: 0 16px 14px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A legend swatch is a dot that stays in place. */
+.swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.swatch.dotHeavy {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  border-radius: 3px;
 }
 
 .panel {
@@ -404,6 +473,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .enter {
+    animation: none;
+  }
   .edgeActive {
     animation: none;
     stroke-dasharray: none;
