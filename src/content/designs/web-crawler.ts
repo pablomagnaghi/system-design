@@ -6,6 +6,7 @@ export const webCrawler: Design = {
   summary:
     'Fetch billions of pages from seed URLs, follow their links, and store the content for later processing, while staying polite to every site, skipping duplicates, and surviving machines that crash mid-crawl.',
   difficulty: 'Hard',
+  minutes: 9,
   requirements: {
     functional: [
       'Start from a list of seed URLs and crawl outward by following links.',
@@ -65,17 +66,66 @@ export const webCrawler: Design = {
   highLevel: {
     label: 'Crawl one page and enqueue its links',
     intro:
-      'Follow one URL from the frontier through fetching, storing and parsing, until its outgoing links are queued for their own turn. Press play, or step through the stages.',
+      'Follow one URL from the frontier through fetching, storing and parsing, until its outgoing links are queued for their own turn. Watch DNS lookups stall the fetchers until a cache joins, and see each part appear as the crawl grows. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       { id: 'seeds', title: 'Seed URLs', detail: 'Start of crawl', column: 0, row: 'middle' },
       { id: 'frontier', title: 'URL frontier', detail: 'Queues by host', column: 1, row: 'middle' },
-      { id: 'hosts', title: 'Host table', detail: 'Robots, next fetch', column: 1, row: 'top' },
-      { id: 'fetchers', title: 'Fetchers', detail: 'Download pages', column: 2, row: 'middle' },
-      { id: 'dns', title: 'DNS cache', detail: 'Resolve hosts', column: 2, row: 'top' },
-      { id: 'blobs', title: 'Blob storage', detail: 'Raw pages', column: 3, row: 'top' },
-      { id: 'parsers', title: 'Parsers', detail: 'Extract links', column: 3, row: 'middle' },
-      { id: 'dedup', title: 'Seen filter', detail: 'URLs and content', column: 2, row: 'bottom' },
-      { id: 'urls', title: 'URL store', detail: 'State per URL', column: 1, row: 'bottom' },
+      {
+        id: 'hosts',
+        title: 'Host table',
+        detail: 'Robots, next fetch',
+        column: 1,
+        row: 'top',
+        appearsAt: 1,
+      },
+      {
+        id: 'fetchers',
+        title: 'Fetchers',
+        detail: 'Download pages',
+        column: 2,
+        row: 'middle',
+        appearsAt: 2,
+      },
+      {
+        id: 'dns',
+        title: 'DNS cache',
+        detail: 'Resolve hosts',
+        column: 2,
+        row: 'top',
+        appearsAt: 3,
+      },
+      {
+        id: 'blobs',
+        title: 'Blob storage',
+        detail: 'Raw pages',
+        column: 3,
+        row: 'top',
+        appearsAt: 5,
+      },
+      {
+        id: 'parsers',
+        title: 'Parsers',
+        detail: 'Extract links',
+        column: 3,
+        row: 'middle',
+        appearsAt: 6,
+      },
+      {
+        id: 'dedup',
+        title: 'Seen filter',
+        detail: 'URLs and content',
+        column: 2,
+        row: 'bottom',
+        appearsAt: 7,
+      },
+      {
+        id: 'urls',
+        title: 'URL store',
+        detail: 'State per URL',
+        column: 1,
+        row: 'bottom',
+        appearsAt: 8,
+      },
     ],
     edges: [
       ['seeds', 'frontier'],
@@ -97,6 +147,9 @@ export const webCrawler: Design = {
           'One big global queue is simpler, but it would hand out ten URLs from the same site in a row and hammer it. Queues per host make politeness a property of the data structure, at the cost of managing millions of small queues.',
         nodes: ['seeds', 'frontier'],
         travel: [['seeds', 'frontier']],
+        short: 'Seed',
+        metrics: { requestsPerSecond: '10K', p95Latency: '5 ms', errorRate: '0%' },
+        load: { frontier: 15 },
       },
       {
         title: 'Pick a host that is ready',
@@ -106,11 +159,32 @@ export const webCrawler: Design = {
           'Scheduling by host readiness enforces politeness without any locks between fetchers. Big sites with many pages are crawled slowly by design, so priority between hosts must be tuned to avoid starving important ones.',
         nodes: ['hosts', 'frontier'],
         travel: [['hosts', 'frontier']],
+        short: 'Ready host',
+        metrics: { requestsPerSecond: '10K', p95Latency: '5 ms', errorRate: '0%' },
+        load: { hosts: 20, frontier: 20 },
+      },
+      {
+        title: 'DNS lookups stall the fetchers',
+        narration:
+          'Fetchers start pulling URLs, and each fetch first resolves its host through a shared upstream resolver. At thousands of fetches a second the resolver throttles and answers slowly, so fetchers spend most of their time waiting on lookups and many fetches time out before a byte is downloaded.',
+        tradeoff:
+          'Adding fetchers only sends more lookups to the same slow resolver. Most fetches go to hosts that were resolved moments ago, so remembering the answers locally removes nearly all of that traffic.',
+        nodes: ['frontier', 'fetchers'],
+        travel: [['frontier', 'fetchers']],
+        short: 'DNS stall',
+        metrics: {
+          requestsPerSecond: '1K',
+          p95Latency: '4 s',
+          errorRate: '12%',
+          alerts: ['p95Latency', 'errorRate'],
+        },
+        load: { frontier: 20, fetchers: 95 },
+        traffic: [{ edge: ['frontier', 'fetchers'], kind: 'failed' }],
       },
       {
         title: 'Check robots and resolve DNS',
         narration:
-          'Before fetching, the fetcher checks the cached robots rules for the host and resolves its address through a local DNS cache.',
+          'A DNS cache joins the fetchers. Before fetching, the fetcher checks the cached robots rules for the host and resolves its address through that local cache.',
         tradeoff:
           'Caching robots rules and DNS answers for hours saves a round trip on nearly every fetch, and DNS is often the hidden bottleneck of a crawler. The cost is reacting late when a site changes its rules or its address.',
         nodes: ['frontier', 'fetchers', 'dns'],
@@ -118,6 +192,9 @@ export const webCrawler: Design = {
           ['frontier', 'fetchers'],
           ['dns', 'fetchers'],
         ],
+        short: 'Robots + DNS',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { frontier: 30, fetchers: 60, dns: 25 },
       },
       {
         title: 'Fetch with strict limits',
@@ -127,6 +204,9 @@ export const webCrawler: Design = {
           'Hard limits protect the crawler from slow servers and endless pages, at the cost of skipping some legitimate large documents. Fetchers are mostly waiting on the network, so each one runs many requests concurrently on async I/O.',
         nodes: ['fetchers'],
         travel: [],
+        short: 'Fetch',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { fetchers: 65 },
       },
       {
         title: 'Store the raw page first',
@@ -136,6 +216,10 @@ export const webCrawler: Design = {
           'Storing first means a parser bug never costs a refetch: the page can be reprocessed from storage. It uses more space than keeping only extracted text, but storage is cheap compared to fetching the web again.',
         nodes: ['fetchers', 'blobs'],
         travel: [['fetchers', 'blobs']],
+        short: 'Store raw',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { fetchers: 65, blobs: 45 },
+        traffic: [{ edge: ['fetchers', 'blobs'], kind: 'heavy' }],
       },
       {
         title: 'Parse and normalize links',
@@ -145,6 +229,9 @@ export const webCrawler: Design = {
           'Parsing in a separate stage lets fetchers stay network-bound and parsers stay CPU-bound, each scaled on its own. Normalization is a judgment call: too loose and the same page is crawled many times, too strict and distinct pages are merged.',
         nodes: ['fetchers', 'parsers'],
         travel: [['fetchers', 'parsers']],
+        short: 'Parse',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { fetchers: 65, parsers: 70 },
       },
       {
         title: 'Drop what was already seen',
@@ -154,6 +241,9 @@ export const webCrawler: Design = {
           'A Bloom filter answers "seen before?" for billions of URLs in a few gigabytes of memory. It has rare false positives, which means a few new URLs are skipped; for a crawl of this size that is an acceptable loss.',
         nodes: ['parsers', 'dedup'],
         travel: [['parsers', 'dedup']],
+        short: 'Seen filter',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { parsers: 70, dedup: 40 },
       },
       {
         title: 'Record state and enqueue new links',
@@ -166,6 +256,9 @@ export const webCrawler: Design = {
           ['dedup', 'urls'],
           ['dedup', 'frontier'],
         ],
+        short: 'Enqueue',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { dedup: 40, urls: 35, frontier: 35 },
       },
       {
         title: 'Recrawl on a schedule',
@@ -175,6 +268,9 @@ export const webCrawler: Design = {
           'Adaptive recrawl spends fetches where content actually changes. It needs history per URL and can miss a sudden change on a page that was quiet for months, so very important pages get a minimum revisit rate.',
         nodes: ['urls', 'frontier'],
         travel: [],
+        short: 'Recrawl',
+        metrics: { requestsPerSecond: '10K', p95Latency: '600 ms', errorRate: '1%' },
+        load: { urls: 35, frontier: 35 },
       },
     ],
   },
