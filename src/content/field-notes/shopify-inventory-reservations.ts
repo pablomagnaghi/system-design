@@ -134,9 +134,9 @@ export const shopifyInventoryReservations: FieldNote = {
       {
         title: 'One row per unit, skip the locked ones',
         narration:
-          'Instead of a quantity column that every buyer fights over, each sellable unit becomes its own row. Reserving takes the rows it needs with SELECT ... FOR UPDATE SKIP LOCKED, so a buyer never waits on rows another buyer already holds, and moves them into a table of held quantities. Holds, claims and the ledger now share one database and one transaction.',
+          'Instead of a quantity column that every buyer fights over, each sellable unit becomes its own row. Reserving takes the rows it needs with SELECT ... FOR UPDATE SKIP LOCKED, so a buyer never waits on rows another buyer already holds, and moves them into a table of held quantities. Holds, claims and the ledger now share one database, so reserve and claim each commit in one local transaction.',
         tradeoff:
-          'SKIP LOCKED (MySQL 8) turns a single hot row into many cold ones, and keeping everything in one database gives ACID from reserve to claim. The cost is many more rows to store and scan, and holds now add load to the database that serves the rest of checkout.',
+          'SKIP LOCKED (MySQL 8) turns a single hot row into many cold ones, and keeping everything in one database makes reserve and claim each a single ACID transaction, with no second system to keep in step. They are still two transactions, with the payment in between. The cost is many more rows to store and scan, and holds now add load to the database that serves the rest of checkout.',
         nodes: ['checkout', 'proxy', 'units', 'reserved', 'ledger'],
         travel: [
           ['checkout', 'proxy'],
@@ -153,7 +153,7 @@ export const shopifyInventoryReservations: FieldNote = {
         narration:
           'A row for every unit in stock would make big items slow to scan. So each item and location keeps at most 1,000 free rows, the cap quoted in the post, and a replenisher tops the pool up from the ledger. If a hot item drains its pool mid-sale, the reserve path refills it inline under a lock: one transaction refills while the others for that item wait, then all proceed.',
         tradeoff:
-          'The cap keeps the table compact and the scan fast; the post says it was sized from peak reservation rates seen during flash sales. The buyer who hits an empty pool pays extra latency, and the waiters queue behind one refill, but nobody is told an item is sold out while stock remains.',
+          'The cap keeps the table compact and the scan fast; the post says it was sized from peak reservation rates seen during flash sales. The buyer who hits an empty pool pays extra latency, and the waiters queue behind one refill, but an empty pool alone never makes an item look sold out while the ledger still has stock. Rows locked by a reserve still in flight are skipped, so on the last units a buyer can be turned away and the unit come back if that reserve rolls back; the post does not cover that case.',
         nodes: ['units', 'replenish', 'ledger'],
         travel: [
           ['replenish', 'ledger'],
@@ -181,7 +181,7 @@ export const shopifyInventoryReservations: FieldNote = {
       {
         title: 'Lock in one order, batch the cart',
         narration:
-          'Reserve and claim touched the two tables in opposite orders and sometimes deadlocked. Now reserve always deletes from the unit pool first and then inserts the hold, and claim only touches the holds, so no cycle can form. Carts with several items fetch all their units in one round trip with UNION ALL.',
+          'Reserve and claim touched the two tables in opposite orders and sometimes deadlocked. Now reserve always deletes from the unit pool first and then inserts the hold, and claim touches the holds but never the unit pool, so no cycle can form between the two tables. Carts with several items fetch all their units in one round trip with UNION ALL.',
         tradeoff:
           'A fixed lock order is a rule every future change has to respect, and nothing enforces it but review. Batching a cart into one query cuts round trips under load at the price of a larger, less obvious statement.',
         nodes: ['proxy', 'units', 'reserved'],
@@ -320,7 +320,7 @@ export const shopifyInventoryReservations: FieldNote = {
   ],
   takeaways: [
     'For a contended counter, turn one hot row into many rows and let SELECT ... FOR UPDATE SKIP LOCKED hand each buyer different ones; cap how many rows exist and refill under a single lock.',
-    'Keep a hold in the same transactional store as the stock it protects, so reserve and claim cannot drift apart.',
+    'Keep a hold in the same transactional store as the stock it protects, so the claim commits the hold and the stock together and the two cannot drift apart.',
     'When CPU is low but work queues, look at connection hold time per caller: tag queries at the application and aggregate at the proxy.',
     'Migrate a correctness-critical path with shadow writes, a comparison on real traffic and a kill switch, rolling out from the quietest tenants up.',
   ],
