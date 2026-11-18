@@ -14,10 +14,10 @@ export const distributedCache: Design = {
       'Keep cached data close to the database: changes show up quickly.',
     ],
     nonFunctional: [
-      'Reads in about a millisecond at hundreds of thousands of requests per second.',
+      'Cache hits in about a millisecond, and a few milliseconds at the 95th percentile with misses included, at tens of thousands of reads per second.',
       'Scale out by adding nodes, moving as few keys as possible.',
       'Stay available when a node fails, and never let a miss storm take the database down.',
-      'Bounded staleness: seconds, not hours.',
+      'Bounded staleness: seconds in the normal case, and never longer than the TTL of an entry.',
     ],
     outOfScope: [
       'Using the cache as the system of record: the database stays the source of truth.',
@@ -190,7 +190,7 @@ export const distributedCache: Design = {
         narration:
           'The shard has the key and answers from memory in well under a millisecond. Each shard has a replica that can take over or serve reads.',
         tradeoff:
-          'Replicas give failover and extra read capacity. Replication is asynchronous to keep writes fast, so right after a failover a few recent writes can be missing; for a cache that only means a few extra misses.',
+          'Replicas give failover and extra read capacity. Replication is asynchronous to keep writes fast, so right after a failover a few recent writes can be missing. A lost fill is only an extra miss. A lost delete is worse: the old value is served again until its TTL, or until the change stream is replayed.',
         nodes: ['shardA', 'shardB', 'shardC'],
         travel: [
           ['ring', 'shardA'],
@@ -380,8 +380,8 @@ export const distributedCache: Design = {
         },
         {
           name: 'Versioned values',
-          pros: 'A fill carrying an older version than the stored one is rejected.',
-          cons: 'Needs a version or timestamp from the database on every row.',
+          pros: 'A fill carrying an older version than the stored value is rejected. A delete leaves a short-lived tombstone with the new version, so a late fill is rejected even when nothing else is stored.',
+          cons: 'Needs a version from the database on every row, and tombstones that outlive any fill in flight.',
         },
         {
           name: 'Delete again shortly after the write',
@@ -395,4 +395,169 @@ export const distributedCache: Design = {
   ],
   wrapUp:
     'A local cache for hot keys, consistent hashing to replicated shards, single-flight loads with jittered TTLs on a miss, delete-on-write plus a change stream for freshness, and a database that never has to absorb a stampede.',
+  guarantees: {
+    provides: [
+      {
+        property: 'Durability',
+        promise:
+          'No write exists only in the cache. Every write is committed to the database first and the cache is filled from the database, so losing any node, or the whole cluster, loses no data.',
+      },
+      {
+        property: 'Read consistency',
+        promise:
+          'Eventual, with bounded staleness. In the normal case a committed write is visible within about a second in the shared cache (delete on write, then the change stream) and within the local TTL of a few seconds on every server. In the worst case, a lost invalidation, the bound is the entry TTL.',
+      },
+      {
+        property: 'Invalidation delivery',
+        promise:
+          'At least once, made harmless by the row version. The change stream consumer commits its position only after the delete succeeded, so a change is never skipped; a repeated delete or tombstone for the same version changes nothing.',
+      },
+      {
+        property: 'Fill ordering',
+        promise:
+          'For keys with versioned values, the cached value never moves backwards. The shard accepts a fill only if its version is at least the version of the stored value or tombstone, compared and written in one atomic step on the node.',
+      },
+      {
+        property: 'Availability',
+        promise:
+          'A cache failure makes reads slower, never wrong and never unavailable by itself. A timeout or a dead shard is treated as a miss, and the per-key load lock plus a cap on concurrent loads keeps the misses from overloading the database.',
+      },
+    ],
+    assumes: [
+      'The database is the source of truth and gives every row a version that only grows, exposed to the loader and in the change stream.',
+      'The change stream contains every committed write, in commit order per row, and is retained longer than the longest consumer outage that should be repaired by replay.',
+      'A tombstone lives longer than the loader’s deadline, so a fill that started before a write cannot arrive after the tombstone is gone.',
+      'Every entry has a TTL. No key is cached forever.',
+      'Clients share a ring that converges within seconds after a change in membership.',
+    ],
+    doesNotGuarantee: [
+      'Read-your-writes or linearizable reads. A flow that must see its own write reads the database.',
+      'Freshness through a failover. Replication is asynchronous, so a promoted replica can miss a recent delete or tombstone and serve the old value until its TTL or until the change stream is replayed.',
+      'That the database commit and the cache delete happen together. They are two writes; the change stream is what repairs a delete that the application never sent.',
+      'That an entry stays cached. Eviction, failover and resharding can drop any entry at any time.',
+      'Exactly one database load per key. The load lock expires, so a slow loader can overlap with a second one; versioned fills make the overlap harmless, and the lock is an optimization, not a correctness mechanism.',
+    ],
+  },
+  failures: [
+    {
+      scenario: 'A shard primary fails and its replica is promoted.',
+      impact:
+        'Reads for that shard fail for the few seconds of the promotion and are treated as misses. Fills that were not replicated become extra misses. Deletes and tombstones that were not replicated are worse: the old value is back and is served as a hit.',
+      detection:
+        'The failover event, the replication offset gap at promotion, and a sampled comparison of cached versions against the database that reports a stale-hit rate.',
+      recovery:
+        'The invalidation consumer for that shard is rewound by more than the replication gap and replays its deletes, which is safe because they are idempotent. Anything still missed expires with its TTL. A new replica syncs from the new primary.',
+    },
+    {
+      scenario: 'A whole shard is lost, and later comes back.',
+      impact:
+        'A third of the keys move to the neighbors and start cold, so about a third of the reads miss at first and the database takes the burst. If the old node only lost its network and returns with its memory intact, it holds entries that missed every delete sent while it was away.',
+      detection:
+        'Healthy shards 2 / 3, a drop in hit ratio, a rise in database queries per second and in load-queue wait time.',
+      recovery:
+        'Single flight keeps it to one load per key and the cap on concurrent loads bounds the total; hot keys are warm again within seconds, the long tail within minutes. A node always rejoins the ring empty: it is flushed first, then given its range back, which causes a second, smaller round of misses.',
+    },
+    {
+      scenario: 'The application commits a write and crashes before deleting the cached key.',
+      impact:
+        'The shared cache keeps the old value. Readers see stale data even though the write was acknowledged.',
+      detection:
+        'The change stream consumer counts deletes that found the key still present. A steady rate is normal for writers that do not know the cache; a jump points at failing application deletes.',
+      recovery:
+        'The change stream delivers the same change about a second later and deletes the key. The state is then the same as if the application had deleted it. If the stream is also stalled, the TTL is the bound.',
+    },
+    {
+      scenario:
+        'A reader loads a row, a writer commits and deletes the key, and then the reader’s fill arrives with the old value.',
+      impact:
+        'With plain deletes the old value is cached again and stays for a full TTL. The same happens when the loader reads from a database replica that lags behind the write.',
+      detection: 'A counter of fills rejected for carrying an older version, per key family.',
+      recovery:
+        'For versioned keys the delete leaves a tombstone with the new row version, so the late fill is rejected and the next read loads the current row. Keys without versions rely on the TTL, which is why their TTL is kept short.',
+    },
+    {
+      scenario: 'The change stream consumer stalls or falls far behind.',
+      impact:
+        'Deletes sent by the application still work. Writes from other services, scripts and migrations are not invalidated, so those keys are stale for up to their TTL.',
+      detection:
+        'An alarm on consumer lag measured in seconds behind the database’s latest commit, not in events.',
+      recovery:
+        'The consumer resumes from its committed position and replays; duplicates are harmless. If the lag is longer than the longest TTL, it can skip to one TTL ago: any entry still in the cache was filled after the older changes were committed, as long as loads read an up-to-date copy of the row.',
+    },
+    {
+      scenario: 'The cluster starts cold: a full restart, a bad flush or a new empty cluster.',
+      impact:
+        'Misses are spread over millions of distinct keys, so single flight only helps for the hot ones. The database would see close to the 50K reads per second that overloaded it before the cache existed.',
+      detection:
+        'Hit ratio near zero, the load queue at its cap, database connections and CPU saturated.',
+      recovery:
+        'The cap on concurrent loads sheds the excess: those reads fail fast instead of piling up on the database. Traffic is shifted to the cold cluster in steps, or shards are restarted one at a time, so only a fraction of the keys is cold at any moment. The cluster ends warm with no repair needed.',
+    },
+  ],
+  capacity: {
+    assumptions: [
+      '1M users and a peak of 50K reads per second, as in the walkthrough; about 50 reads for every write.',
+      'The local caches answer about 20% of the reads (the hottest keys). The shared cache hits on 95% of the rest.',
+      '30M cacheable entries of about 1 KB each, counting key, value and per-entry overhead. TTL of 10 minutes with jitter.',
+      'A cache node has 16 GB of memory, of which 12 GB is the data budget; the rest covers fragmentation and replication buffers.',
+      'An application server handles about 500 requests per second.',
+    ],
+    estimates: [
+      {
+        label: 'Reads reaching the shards',
+        value: '~40K/s',
+        math: '50K/s × (1 − 0.20 served locally) = 40K/s, about 13K/s per shard. Far below what one node can serve.',
+      },
+      {
+        label: 'Database reads after the cache',
+        value: '~2K/s (25× fewer)',
+        math: '40K/s × 5% misses = 2K loads/s, against 50K/s before. Each point of hit ratio lost adds 400 loads/s.',
+      },
+      {
+        label: 'Invalidations',
+        value: '~2K deletes/s',
+        math: '50K reads/s ÷ 50 = 1K writes/s; each is deleted once by the application and once by the change stream.',
+      },
+      {
+        label: 'Memory',
+        value: '30 GB of data, 96 GB provisioned',
+        math: '30M entries × 1 KB = 30 GB; ÷ 12 GB budget per node = 2.5, so 3 shards; × 2 for replicas = 6 nodes × 16 GB.',
+      },
+      {
+        label: 'Keys moved when a shard is added',
+        value: '~25%, not ~75%',
+        math: 'Consistent hashing, 3 → 4 shards: 1/4 of 30M = 7.5M keys move. With hash mod N only the keys where h mod 3 = h mod 4 stay, 3 in 12, so 75% move.',
+      },
+      {
+        label: 'Misses when a shard is lost',
+        value: '~13K/s at first',
+        math: '40K/s ÷ 3 shards ≈ 13K reads/s start cold, on top of the usual 2K/s: about 30% of the load that used to overload the database, falling as keys warm up.',
+      },
+    ],
+    implications: [
+      'Memory sets the shard count, not throughput: each shard is asked for 13K operations a second and could serve several times that. Scaling out is driven by data size and hit ratio.',
+      'The database is sized for about 2K reads per second plus headroom, not for 50K. That makes the cache part of the capacity plan, so the stampede and cold-start protections are required, not optional.',
+      'Hit ratio is the number to watch. Going from 95% to 90% doubles the database reads, so eviction rate and hit ratio have alarms before latency does.',
+      'A lost shard is survivable (about 15K loads a second in the first moments), a lost cluster is not (40K). Hence replicas, one-at-a-time restarts and a cap on concurrent loads.',
+      'With 100 application servers, a local cache of 10K entries costs about 10 MB each and removes a fifth of the network calls. It is cheap, and it is also where the few seconds of extra staleness come from.',
+    ],
+  },
+  evolution: {
+    mvp: 'One cache node with a replica, cache-aside with a TTL and delete on write in the application. No local cache, no ring, no change stream, no versions. This is enough while the data fits in one node, the application is the only writer and a stale read for one TTL is acceptable.',
+    atScale: [
+      'At 10x (500K reads/s, about 300 GB): around 30 shards. The ring becomes shared configuration with a version, pushed to clients from a coordination service. Hot key detection and the local cache become necessary, and so does the change stream, because by now there are writers that do not know the cache.',
+      'Also at 10x: about 1,000 application servers each holding connections to 30 shards. A proxy tier or a sidecar starts to pay for itself by pooling connections and owning the ring.',
+      'At 100x (millions of reads per second, terabytes): memory is the main cost. Large or cold values move to a flash tier, values are compressed, and admission control keeps one-hit keys out. Each region gets its own cluster, and invalidations, not values, are sent across regions.',
+      'At that size a cold cluster cannot be warmed by production traffic alone, so new clusters are warmed from a running one before they take reads.',
+    ],
+    firstBottleneck:
+      'Memory per shard. When the working set outgrows the budget, eviction removes entries that are still being read, the hit ratio drops, and database load grows much faster than traffic: a few points of hit ratio are a multiple of database reads. A single hot key saturating one shard shows up earlier in some workloads, and the local cache is the answer to that one.',
+    avoided: [
+      'Write-through and write-behind. They make the cache part of the write path and, for write-behind, a place where data can be lost. Worth it only for data that can be recomputed or lost.',
+      'Versioned fills on every key. They need a version on every row and a tombstone on every delete. Worth it for the key families where a stale read for one TTL is a real problem, such as permissions or prices.',
+      'A consistent cache with leases or consensus on every read. It would give read-your-writes at the price of the latency the cache exists to remove. A flow that needs it reads the database.',
+      'A proxy tier from day one. Client-side routing is one hop fewer and one fleet fewer. Worth adding when connection counts or several client languages make the ring hard to keep in sync.',
+      'Refresh-ahead for hot keys (serve the current value while one request reloads it before expiry). It hides miss latency but adds background load and logic. Worth it when the p99 of a miss on a hot key matters.',
+    ],
+  },
 };
