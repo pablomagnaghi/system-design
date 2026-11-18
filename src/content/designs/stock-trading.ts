@@ -14,7 +14,7 @@ export const stockTrading: Design = {
       'Users see the status of their orders and their positions update as orders fill.',
     ],
     nonFunctional: [
-      'An order is never lost or sent twice, and every change to it is auditable.',
+      'An accepted order is never lost or executed twice, and every change to it is auditable. It can be sent to the venue more than once; the venue deduplicates by client order id.',
       'Prices reach the app within about a second; the latest price matters more than every tick.',
       'Millions of connected users and a spike of orders in the first minutes after the market opens.',
       'A storm of price updates must never slow down placing or canceling an order.',
@@ -273,7 +273,7 @@ export const stockTrading: Design = {
       {
         title: 'Relay through an outbox',
         narration:
-          'The same transaction writes an outbox row. A relay reads new outbox rows and hands them to the venue gateway, marking each one sent only after the gateway accepts it. The user already has a 202 and sees the order as pending.',
+          'The same transaction writes an outbox row. A relay reads new outbox rows and hands them to the venue gateway, marking each one sent only after the gateway accepts it. The user gets the 202 only after that transaction commits on a synchronously replicated database, and sees the order as pending.',
         tradeoff:
           'Calling the venue inside the request couples the user’s wait to an outside system and loses the order if the server dies between the database write and the call. The outbox guarantees that every stored order is eventually sent, at the cost of a short delay and the chance of sending twice, which the next stage absorbs.',
         nodes: ['db', 'relay', 'broker'],
@@ -293,9 +293,9 @@ export const stockTrading: Design = {
       {
         title: 'Send with our own order id',
         narration:
-          'The venue gateway keeps a long-lived session with each exchange or broker and sends the order tagged with our client order id, which the venue rejects if it has seen it before and echoes on every reply.',
+          'The venue gateway keeps a long-lived session with each exchange or broker and sends the order tagged with our client order id, which the venue rejects if it has seen it before and echoes on every reply. A reject for a duplicate id means the first copy arrived, so the gateway treats the order as live and waits for its status, not as failed.',
         tradeoff:
-          'Without our own id, a timeout leaves two bad choices: resend and maybe buy twice, or give up and maybe have a live order we do not know about. Our id makes a resend safe and lets us ask the venue later; the cost is that a timeout means "unknown", a state the system must handle explicitly.',
+          'Without our own id, a timeout leaves two bad choices: resend and maybe buy twice, or give up and maybe have a live order we do not know about. Our id makes a resend safe and lets us ask the venue later; the cost is that a timeout means "unknown", a state the system must handle explicitly. Venues remember ids only for a window, usually the trading day, so the relay stops resending an order past that window and leaves it to the reconciler.',
         nodes: ['broker', 'venue'],
         travel: [['broker', 'venue', 'new, cancel']],
         short: 'Send',
@@ -310,7 +310,7 @@ export const stockTrading: Design = {
       {
         title: 'Fills drive the state machine',
         narration:
-          'Acks, partial fills and final states arrive asynchronously and go to a durable execution log. The order updater applies each one as a state transition, records the fill by its execution id, moves shares and cash in the account, and releases whatever part of the hold the fill did not use.',
+          'Acks, partial fills and final states arrive asynchronously and go to a durable execution log; the gateway confirms a venue message only after the append, so a crash makes the venue session resend it. The order updater applies each one as a state transition, records the fill by its execution id, moves shares and cash in the account, and releases whatever part of the hold the fill did not use.',
         tradeoff:
           'Updating the order straight from the gateway callback loses events if the updater is down. A log costs one more hop, and in exchange events are replayable, applied in order per order id, and deduplicated by execution id so a replay never fills twice.',
         nodes: ['venue', 'log', 'updater', 'db'],
@@ -431,7 +431,7 @@ export const stockTrading: Design = {
         },
         {
           name: 'Mark it unknown and ask by client order id',
-          pros: 'A resend with the same id is safe, and a status query settles the truth.',
+          pros: 'A resend with the same id is safe within the venue’s dedup window, and a status query settles the truth.',
           cons: 'Needs an explicit unknown state, a reconciler and venues that support lookups by our id.',
         },
       ],
@@ -458,7 +458,7 @@ export const stockTrading: Design = {
         },
       ],
       choice:
-        'Scale ahead of the open, keep the price plane and the order plane apart so a quote storm cannot slow trading, and let the outbox absorb the burst: under pressure prices may lag, orders must never be lost.',
+        'Scale ahead of the open, keep the price plane and the order plane apart so a quote storm cannot slow trading, and let the outbox absorb the burst: under pressure prices may lag, but an accepted order must never be lost.',
     },
   ],
   wrapUp:
