@@ -16,7 +16,7 @@ export const postSearch: Design = {
     ],
     nonFunctional: [
       'Search answers in a few hundred milliseconds at the tail.',
-      'Scale to billions of posts, hundreds of millions of new posts a day and thousands of searches a second.',
+      'Scale to billions of posts, hundreds of millions of new posts a day and tens of thousands of searches a second, with spikes of hundreds of thousands during news events.',
       'Many more likes than posts: like counts can lag by a little.',
       'Search can be eventually consistent; it is never the source of truth for a post.',
     ],
@@ -137,7 +137,7 @@ export const postSearch: Design = {
       {
         title: 'Publish posts as events',
         narration:
-          'When a user posts, the post service stores it in its own database and publishes an event. The search system never writes to the post database; it only consumes the stream.',
+          'When a user posts, the post service stores it in its own database and records the event in an outbox in the same transaction; a relay publishes it at least once. The search system never writes to the post database; it only consumes the stream, and indexing is keyed by post id, so a repeated event changes nothing.',
         tradeoff:
           'Having the post service call the indexer directly would make posting fail or slow down whenever search is struggling. A stream decouples them and lets indexers replay from any point to rebuild, at the cost of a delay of seconds before a post is searchable.',
         nodes: ['posts', 'stream'],
@@ -178,7 +178,7 @@ export const postSearch: Design = {
         narration:
           'Likes arrive far more often than posts. Indexers add them up per post for a short window and update the stored count only when it crosses a meaningful step, such as the next power of two.',
         tradeoff:
-          'Updating the index on every like would multiply the write load by the like rate. Batching and thresholds keep writes small, and the cost is that the like order in results is approximate. Exact counts are fetched from the post service for the final page.',
+          'Updating the index on every like would multiply the write load by the like rate. Batching and thresholds keep writes small, and the cost is that the like order in results is approximate; a like event delivered twice can nudge the indexed count, which is periodically reset from the post service. Exact counts are fetched from the post service for the final page.',
         nodes: ['stream', 'indexer', 'shards'],
         travel: [
           ['stream', 'indexer'],
@@ -255,9 +255,9 @@ export const postSearch: Design = {
       {
         title: 'Paginate with a cursor',
         narration:
-          'The response carries a cursor: the last sort key returned, such as a timestamp and post id. The next page asks each shard for results after that key.',
+          'The response carries a cursor: the last sort key returned, such as a timestamp and post id. The next page asks each shard for results after that key. For the likes sort the key is the indexed like count and post id, and counts can change between pages.',
         tradeoff:
-          'Page numbers with an offset are simple but get slower deeper in and shift when new posts arrive. A cursor makes every page as cheap as the first and keeps results stable while the user scrolls, and in exchange users cannot jump straight to page 50.',
+          'Page numbers with an offset are simple but get slower deeper in and shift when new posts arrive. A cursor makes every page as cheap as the first, and in exchange users cannot jump straight to page 50. Sorted by newest, the key never changes, so results stay stable while the user scrolls. Sorted by likes, a post whose count moves across the cursor can be skipped or shown again, so that order is approximate and the client drops repeats by post id.',
         nodes: ['user', 'api', 'broker'],
         travel: [
           ['user', 'api'],
