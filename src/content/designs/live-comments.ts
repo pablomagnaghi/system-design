@@ -18,7 +18,7 @@ export const liveComments: Design = {
       'New comments reach viewers in under about two seconds.',
       'Scale to millions of concurrent viewers, with single videos watched by hundreds of thousands.',
       'Availability over strict ordering: viewers may see comments in slightly different orders.',
-      'A posted comment is never lost once the poster sees it accepted.',
+      'A comment is accepted only after a replicated write, so a comment the poster saw accepted is not lost.',
     ],
     outOfScope: [
       'Moderation, spam filtering and ranking of comments.',
@@ -152,7 +152,7 @@ export const liveComments: Design = {
       {
         title: 'Store it durably first',
         narration:
-          'The comment is written to a store partitioned by video, with an id that sorts by time. Only then does the poster get a success.',
+          'The comment is written to a replicated store partitioned by video, with an id that sorts by time. Only when that write is acknowledged does the poster get a success.',
         tradeoff:
           'Publishing first and storing later would shave a few milliseconds, and risk showing comments that are then lost. Storing first makes every accepted comment durable, and a write-optimized store keeps the extra latency small.',
         nodes: ['api', 'store'],
@@ -164,9 +164,9 @@ export const liveComments: Design = {
       {
         title: 'Publish on the video channel',
         narration:
-          'The API publishes the comment on a pub/sub channel named after the video. Pub/sub here is fire and forget: it does not keep messages for later.',
+          'The API publishes the comment on a pub/sub channel named after the video. Pub/sub here is fire and forget: it does not keep messages for later. If the API crashes between the write and the publish, the comment is not pushed live, but it is in the store and shows up on the next reload or reconnect.',
         tradeoff:
-          'A durable log per video would allow replay, but adds storage and offset tracking for data that is already stored. Fire-and-forget pub/sub is fast and simple, and a viewer who misses a message can always reload recent comments from the store.',
+          'A durable log per video would allow replay, but adds storage and offset tracking for data that is already stored. Fire-and-forget pub/sub is fast and simple, and the store covers the gaps. Each event carries the comment id as its event id, so a client that reconnects sends the last id it saw and the server backfills the newer comments before resuming the stream. Ids are not consecutive, so a comment dropped without a disconnect goes unnoticed until the viewer reloads, which is acceptable for live comments.',
         nodes: ['api', 'pubsub'],
         travel: [['api', 'pubsub', 'publish']],
         short: 'Publish',
@@ -236,7 +236,7 @@ export const liveComments: Design = {
         narration:
           'A cache joins the history path. A viewer who joins mid-stream first loads the last few hundred comments, and the cache keeps them per video, so a crowd joining at once does not hit the store.',
         tradeoff:
-          'Reading the store on every join is simple but a popular video can bring thousands of joins per second. A small cache per video absorbs them, at the cost of keeping it in sync with new comments.',
+          'Reading the store on every join is simple but a popular video can bring thousands of joins per second. A small cache per video absorbs them, at the cost of keeping it in sync with new comments. Each new comment is appended to the cached list, and a short expiry bounds how long a missed append can leave it stale.',
         nodes: ['viewers', 'history', 'cache'],
         travel: [
           ['viewers', 'history', 'join late'],
