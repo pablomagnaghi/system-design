@@ -176,7 +176,7 @@ export const metaZgateway: FieldNote = {
       {
         title: 'Put a proxy tier in between',
         narration:
-          'ZGateway is a stateless regional tier found through ServiceRouter. A client keeps a sticky pool to nearby gateway hosts, which end TLS, check the use case’s access rules and forward through an embedded copy of the thick client, one per use case. Database hosts now see only gateway hosts, a fleet Meta sizes.',
+          'ZGateway is a regional tier found through ServiceRouter. The post calls it stateless: any host in a regional tier can serve any request. A client keeps a sticky pool to nearby gateway hosts, which end TLS, check the use case’s access rules and forward through an embedded copy of the thick client, one per use case. Database hosts now see only gateway hosts, a fleet Meta sizes.',
         tradeoff:
           'Every request pays one more hop, and the post puts the extra compute at about 6% for an average use case. In return, by the post’s own model, connections per host drop by about 97 to 98% and total connections by about 19x.',
         nodes: ['clients', 'router', 'gateway', 'engine', 'zservers'],
@@ -269,9 +269,9 @@ export const metaZgateway: FieldNote = {
       {
         title: 'Serve hot reads from a cache',
         narration:
-          'On the cache tier, hot reads come from memory and each host owns a slice of keys by consistent hashing. A miss takes a per-key lock so only one fetch reaches the database. A change stream of writes and checkpoints invalidates or refreshes entries within a stated staleness bound.',
+          'On the cache tier, hot reads come from memory and each host owns a slice of keys by consistent hashing. A miss takes a per-key lock so only one fetch reaches the database. A change stream of writes and checkpoints invalidates or refreshes entries, under what the post calls an explicit bounded-staleness contract.',
         tradeoff:
-          'Reads move off storage and get faster, but the cache is only as fresh as its change stream, so callers accept bounded staleness. Moving weight between cache hosts also moves keys, which makes rebalancing costly.',
+          'Reads move off storage and get faster, but the cache is only as fresh as its change stream, so callers accept bounded staleness. The bound can only hold while the stream keeps up; the post gives no value for it and does not say how a fill that races an invalidation is handled. Moving weight between cache hosts also moves keys, which makes rebalancing costly.',
         nodes: ['gateway', 'cache', 'zservers', 'cdc'],
         travel: [
           ['gateway', 'cache'],
@@ -302,7 +302,7 @@ export const metaZgateway: FieldNote = {
   tradeoffs: [
     'Every request takes an extra network hop through a tier that must be run, sized and kept healthy; the post puts the overhead at about 6% for an average use case.',
     'Two access paths coexist during a long migration: the gateway carried about 40% of ZippyDB traffic when the post was written.',
-    'Moving client-side state onto the gateway, such as transaction bookkeeping, meant a careful phased rollout of the most correctness-critical code.',
+    'Moving client-side state onto the gateway, such as transaction bookkeeping, meant a careful phased rollout of the most correctness-critical code. It also means a gateway host is stateless only between transactions: it holds the read set and pending writes of each open one, and the post does not say what happens to them if the host fails.',
     'Many tenants share one process, so one tenant’s memory blowup can still threaten a host; the post lists splitting the gateway into several processes as future work.',
   ],
   takeaways: [
