@@ -17,9 +17,9 @@ export const llmChat: Design = {
     ],
     nonFunctional: [
       'First token in under a second for paid tiers, then a steady stream of tens of tokens per second.',
-      'Tens of millions of daily users and thousands of new generations per second at peak.',
+      'Millions of daily users, with thousands of new generations per second on a normal day and tens of thousands in a launch surge.',
       'GPUs are the bottleneck and the main cost, so they must stay busy without blowing latency.',
-      'A dropped connection never loses an answer that is being or has been generated.',
+      'A dropped connection does not lose an answer: generation continues into a replicated buffer, the client can resume while that buffer lives (a few minutes after the answer ends), and after that it reads the saved message.',
     ],
     outOfScope: [
       'Training and fine-tuning models.',
@@ -180,7 +180,7 @@ export const llmChat: Design = {
         narration:
           'A small, fast classifier checks the prompt before any GPU time is spent. High-severity categories are refused right away; borderline ones are allowed and flagged for review.',
         tradeoff:
-          'Skipping the check saves tens of milliseconds and lets the big model refuse on its own, which is unreliable and burns expensive capacity. A separate classifier adds latency to every message and some false positives, and fails closed only for the worst categories so an outage does not block everyone.',
+          'Skipping the check saves tens of milliseconds and lets the big model refuse on its own, which is unreliable and burns expensive capacity. A separate classifier adds latency to every message and some false positives, and an outage of the classifier must not block everyone. With the classifier down nothing can sort prompts into categories, so the API falls back to a cheap local blocklist that still refuses the worst content and lets the rest through flagged, with the output check as the backstop.',
         nodes: ['api', 'safety'],
         travel: [['api', 'safety', 'check']],
         short: 'Input check',
@@ -229,7 +229,7 @@ export const llmChat: Design = {
         narration:
           'The GPU server appends tokens in small numbered chunks to a buffer keyed by message ID. The API server holding the client connection tails that buffer and forwards each chunk as an SSE event with its number.',
         tradeoff:
-          'Streaming straight from the GPU to the API server is one hop shorter, and ties the generation to a single connection that may drop. A buffer costs a few milliseconds per chunk and a store to run, and lets the answer keep generating whatever happens to the client.',
+          'Streaming straight from the GPU to the API server is one hop shorter, and ties the generation to a single connection that may drop. A buffer costs a few milliseconds per chunk and a replicated store to run, and lets the answer keep generating whatever happens to the client. The answer survives only while the buffer does, so losing the buffer node and its replica together means generating again.',
         nodes: ['gpu', 'buffer', 'api', 'client'],
         travel: [
           ['gpu', 'buffer', 'tokens'],
@@ -242,7 +242,7 @@ export const llmChat: Design = {
       {
         title: 'Resume after a dropped connection',
         narration:
-          'A phone switches networks mid-answer. The client reconnects to any API server with the last event number it saw, and that server replays the buffer from there and keeps tailing. The buffer expires a few minutes after the answer ends.',
+          'A phone switches networks mid-answer. The client reconnects to any API server with the last event number it saw, and that server replays the buffer from there and keeps tailing. The buffer expires a few minutes after the answer ends; a client that returns later loads the saved message instead of resuming.',
         tradeoff:
           'Without resume, a dropped connection means asking again and paying for the whole answer twice. Keeping chunks for a few minutes costs memory in the buffer, which is small next to the GPU time it saves.',
         nodes: ['client', 'api', 'buffer'],
@@ -309,9 +309,9 @@ export const llmChat: Design = {
       {
         title: 'Save the answer and settle usage',
         narration:
-          'When the stream ends, the API saves the assistant message with its real token count and status. It emits a usage event, and the meter settles the earlier estimate against the actual tokens for limits and billing.',
+          'When the stream ends, the API saves the assistant message with its real token count and status. It emits a usage event, and the meter settles the earlier estimate against the actual tokens for limits and billing. The event can arrive more than once, so the meter settles by message ID and a repeat changes nothing.',
         tradeoff:
-          'Writing the answer to the database token by token would cost thousands of writes per message. Saving once at the end relies on the buffer to hold the answer until then; the cost is a short window where a crash of the API server leaves the answer only in the buffer, so a sweeper saves orphaned answers.',
+          'Writing the answer to the database token by token would cost thousands of writes per message. Saving once at the end relies on the buffer to hold the answer until then; the cost is a short window where a crash of the API server leaves the answer only in the buffer, so a sweeper saves orphaned answers and emits their missing usage events before the buffer expires.',
         nodes: ['api', 'convdb', 'meter'],
         travel: [
           ['api', 'convdb', 'history'],
