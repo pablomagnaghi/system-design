@@ -15,8 +15,8 @@ export const rideSharing: Design = {
       'Rider and driver both see the state of the ride: requested, accepted, in progress, completed.',
     ],
     nonFunctional: [
-      'Match in under about ten seconds, or tell the rider no driver was found.',
-      'A driver never holds two offers at once, and a ride is never assigned to two drivers.',
+      'Match within seconds when a driver is nearby; after about a minute without a match, tell the rider no driver was found.',
+      'A driver sees one offer at a time, and a ride is never assigned to two drivers or a driver to two rides.',
       'Absorb hundreds of thousands of location updates per second from online drivers.',
       'Survive demand spikes in one city, such as the end of a concert, without dropping requests.',
     ],
@@ -220,9 +220,9 @@ export const rideSharing: Design = {
       {
         title: 'Request a ride through a queue',
         narration:
-          'A queue joins the request path. The rider requests the ride with the fare id and an idempotency key, and the API writes a requested ride and puts it on a queue partitioned by city, then returns at once; the app waits for updates.',
+          'A queue joins the request path. The rider requests the ride with the fare id and an idempotency key, and the API writes a requested ride and an outbox row in one transaction, then returns at once; a relay moves the row to a queue partitioned by city, and the app waits for updates. A sweeper puts back on the queue any ride that stays requested with no offer past a deadline.',
         tradeoff:
-          'Matching inside the request would be simpler, but a spike in one city would exhaust the API and drop requests. A durable queue absorbs the spike and lets matchers scale per city, at the cost of a few hundred milliseconds of delay and an asynchronous flow for the app.',
+          'Matching inside the request would be simpler, but a spike in one city would exhaust the API and drop requests. A durable queue absorbs the spike and lets matchers scale per city, at the cost of a few hundred milliseconds of delay and an asynchronous flow for the app. The relay and the queue deliver at least once, which is harmless because a matcher skips a ride that already has a driver or an open offer.',
         nodes: ['rider', 'api', 'queue', 'matcher'],
         travel: [
           ['rider', 'api'],
@@ -260,7 +260,7 @@ export const rideSharing: Design = {
         narration:
           'Before offering, the matcher takes a lock on the best driver with a time to live of about ten seconds. If another matcher already holds that driver, it moves to the next candidate.',
         tradeoff:
-          'Without a lock, two matchers could offer the same driver two rides at once. A lock in a shared cache adds a dependency, and its time to live means a crashed matcher frees the driver on its own instead of blocking them forever.',
+          'Without a lock, two matchers could offer the same driver two rides at once. A lock in a shared cache adds a dependency, and its time to live means a crashed matcher frees the driver on its own instead of blocking them forever. The lock is not a guarantee: if the cache fails over and drops it, a driver can briefly get a second offer, and the conditional update at accept is what keeps the outcome correct.',
         nodes: ['matcher', 'lock'],
         travel: [['matcher', 'lock']],
         short: 'Lock driver',
@@ -275,9 +275,9 @@ export const rideSharing: Design = {
       {
         title: 'Offer with a deadline',
         narration:
-          'The driver gets a push notification with the pickup and the fare, and has a few seconds to accept. The lock expires at the same time as the offer.',
+          'The driver gets a push notification with the pickup and the fare, and has about ten seconds to accept. The lock expires at the same time as the offer.',
         tradeoff:
-          'Offering to one driver at a time is fair and avoids races, but a slow decline delays the rider. Offering to several at once is faster and leaves drivers who accepted with nothing; a short deadline keeps the sequential approach fast enough.',
+          'Offering to one driver at a time is fair and avoids races, but a slow decline delays the rider. Offering to several at once is faster and leaves drivers who accepted with nothing; a short deadline keeps the sequential approach fast enough: most rides match on the first offer, and each decline or timeout adds up to ten seconds.',
         nodes: ['lock', 'offer'],
         travel: [['lock', 'offer']],
         short: 'Offer',
@@ -384,12 +384,12 @@ export const rideSharing: Design = {
         },
         {
           name: 'Durable queue partitioned by city',
-          pros: 'Nothing is dropped; matchers scale where demand is.',
+          pros: 'An accepted request is not dropped; matchers scale where demand is.',
           cons: 'Asynchronous flow, and a backlog means longer waits that must be shown honestly.',
         },
       ],
       choice:
-        'A durable queue per city, with surge pricing as the economic pressure valve: higher fares reduce demand and bring more drivers online while the backlog drains.',
+        'A durable queue per city, fed from an outbox so a stored ride always reaches it, with surge pricing as the economic pressure valve: higher fares reduce demand and bring more drivers online while the backlog drains.',
     },
   ],
   wrapUp:
