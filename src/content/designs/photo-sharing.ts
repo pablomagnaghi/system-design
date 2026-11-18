@@ -16,7 +16,7 @@ export const photoSharing: Design = {
     nonFunctional: [
       'Hundreds of millions of daily users and tens of millions of new photos a day.',
       'Images appear in a fraction of a second anywhere in the world; reads outnumber uploads by orders of magnitude.',
-      'A photo is never lost once the post is published.',
+      'A photo is never lost once the post is published: a post publishes only after its originals sit in object storage that replicates across zones.',
       'A new post reaches followers within about a minute.',
     ],
     outOfScope: [
@@ -160,7 +160,7 @@ export const photoSharing: Design = {
       {
         title: 'Create a pending post',
         narration:
-          'The app sends the caption and the number of photos. The API stores a post with status "pending" and returns one presigned upload URL per photo, each bound to a key, a content type and a maximum size, and valid for a few minutes.',
+          'The app sends the caption and the number of photos. The API stores a post with status "pending" and returns one presigned upload URL per photo, each bound to a key and a content type, and valid for a few minutes. A presigned PUT cannot cap the size of the upload, so the resizer checks the object size first and deletes anything over the limit; a presigned POST with a size range in its policy is the alternative that rejects it at upload.',
         tradeoff:
           'Creating the post first gives every upload a home and lets the app retry against a known ID. The cost is pending posts whose uploads never finish, which a sweep deletes after an hour along with any orphaned objects.',
         nodes: ['author', 'api', 'posts'],
@@ -203,7 +203,7 @@ export const photoSharing: Design = {
       {
         title: 'Publish only when every photo is ready',
         narration:
-          'When the last photo of a post has its variants, the resizer records their keys and dimensions and flips the post from "pending" to "published" with a conditional update. Only a published post can enter feeds.',
+          'Each resizer records the variant keys and dimensions of its photo and then, in the same transaction, flips the post from "pending" to "published" with a conditional update that applies only if every photo of the post is ready. The transaction locks the post row, so two photos that finish together cannot each see the other as missing and leave the post pending. Only a published post can enter feeds.',
         tradeoff:
           'Publishing at once and filling images in later would show followers broken tiles. Waiting for processing adds a few seconds before the post is visible, which is invisible next to the minute allowed for fan-out.',
         nodes: ['resize', 'posts'],
@@ -217,7 +217,7 @@ export const photoSharing: Design = {
         narration:
           'Following someone writes two rows: one under the follower, listing who they follow, and one under the followee, listing who follows them. Each table is partitioned by its owner and sorted by time.',
         tradeoff:
-          'One table answers only one of the two questions cheaply; the other becomes a scan. Writing both doubles the writes and needs a retry so the two sides never disagree for long, and in exchange "who do I follow" and "who follows me" are each a single partition read.',
+          'One table answers only one of the two questions cheaply; the other becomes a scan. Writing both doubles the writes and needs a queued retry, one that survives a crash between the two writes, so the two sides never disagree for long, and in exchange "who do I follow" and "who follows me" are each a single partition read.',
         nodes: ['api', 'graph'],
         travel: [['api', 'graph', 'follow']],
         short: 'Follows',
@@ -227,7 +227,7 @@ export const photoSharing: Design = {
       {
         title: 'Fan the post out to followers',
         narration:
-          'Publishing emits an event. The feed service pages through the author’s followers and adds the post ID to each follower’s feed list; very large accounts are skipped and merged at read time, as in the news feed design.',
+          'Publishing emits an event from an outbox row written in the same transaction as the status flip, so a crash cannot leave a published post that never fans out. Delivery is at least once, and adding the same post ID to a feed twice changes nothing. The feed service pages through the author’s followers and adds the post ID to each follower’s feed list; very large accounts are skipped and merged at read time, as in the news feed design.',
         tradeoff:
           'Here the feed only moves IDs, never images, so fan-out stays cheap even with heavy media. The cost is a hydrate step at read time to turn IDs into captions and image URLs, which a post cache makes fast.',
         nodes: ['posts', 'feed', 'graph'],
@@ -277,9 +277,9 @@ export const photoSharing: Design = {
       {
         title: 'A viral post floods the bucket',
         narration:
-          'A post goes viral and is opened all over the world within minutes. Hundreds of edges have never seen its images, so each one misses and reads the variants bucket on its own. Requests on those keys go past what the bucket serves per key, it starts throttling, and some images fail to load.',
+          'A post goes viral and is opened all over the world within minutes. Hundreds of edges have never seen its images, so each one misses and reads the variants bucket on its own. Every miss is a slow, billed read from a distant origin, and the burst goes past the request rate the bucket serves for that key prefix, so it starts throttling and some images fail to load.',
         tradeoff:
-          'More edges do not help, because every new edge is one more miss on the same few files. The bucket is cheap and durable but is not built to absorb a burst of reads on a handful of keys, so the misses need to be collapsed before they reach it.',
+          'More edges do not help, because every new edge is one more miss on the same few files. The bucket is cheap and durable but is not built to absorb a sudden burst of reads under one prefix, so the misses need to be collapsed before they reach it.',
         nodes: ['viewer', 'cdn', 'variants'],
         travel: [
           ['viewer', 'cdn', 'images'],
@@ -311,9 +311,9 @@ export const photoSharing: Design = {
       {
         title: 'Move old photos to a cheaper tier',
         narration:
-          'Lifecycle rules move originals and large variants that have not been read for months to an infrequent-access tier. Thumbnails and feed sizes stay in the standard tier because old profiles are still browsed.',
+          'Lifecycle rules act on the age of an object, so they move originals and large variants to an infrequent-access tier a few months after upload. Thumbnails and feed sizes stay in the standard tier because old profiles are still browsed.',
         tradeoff:
-          'Storage grows forever, so tiering cuts the biggest line of the bill. The cost is slower and pricier reads on the rare old photo, and originals are kept rather than deleted so a new format or size can be produced later.',
+          'Storage grows forever, so tiering cuts the biggest line of the bill. The cost is pricier reads on the rare old photo that is still popular, which only a storage class that tiers by last access would avoid, and originals are kept rather than deleted so a new format or size can be produced later.',
         nodes: ['variants', 'cold'],
         travel: [['variants', 'cold', 'age out']],
         short: 'Cold tier',
@@ -370,7 +370,7 @@ export const photoSharing: Design = {
         },
       ],
       choice:
-        'Two key-value tables, written together with a retry so they converge. Large follower lists are paged, and follower counts live in separate counters instead of being counted from the rows.',
+        'Two key-value tables, written together with a queued retry so they converge. Large follower lists are paged, and follower counts live in separate counters instead of being counted from the rows.',
     },
     {
       question: 'How do we keep image delivery fast and affordable?',
