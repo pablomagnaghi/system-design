@@ -9,7 +9,7 @@ interface Props {
 const site = 'System Design, Step by Step';
 const {
   title,
-  description = 'Reference system designs explained step by step, with interactive diagrams and the trade-off behind every choice.',
+  description = 'An interactive system design library: how production systems are designed, scaled, operated and evolved, with trade-offs, guarantees, failure scenarios and capacity math.',
 } = Astro.props;
 const pageTitle = title ? `${title} · ${site}` : site;
 const canonical = new URL(Astro.url.pathname, Astro.site);
