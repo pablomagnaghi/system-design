@@ -18,7 +18,7 @@ export const bookingSystem: Design = {
       'Never double-book a night: correctness over availability at the moment of booking.',
       'Search is fast and can be a few seconds stale.',
       'Retries from clients or payment providers never create a second booking or a second charge.',
-      'Scale to millions of searches a day and thousands of bookings a minute at peak.',
+      'Scale to tens of thousands of searches a second and thousands of bookings a minute at peak.',
     ],
     outOfScope: [
       'Ranking and personalization of search results.',
@@ -214,9 +214,9 @@ export const bookingSystem: Design = {
       {
         title: 'Authorize the payment',
         narration:
-          'The card is authorized, not charged, with an idempotency key derived from the booking id. The capture happens later, according to the cancellation policy.',
+          'The card is authorized, not charged, with an idempotency key derived from the booking id. The capture happens later, according to the cancellation policy, and always before the authorization expires, which is about a week for most cards.',
         tradeoff:
-          'Authorizing first means a failed or abandoned booking never needs a refund. Capturing immediately is simpler, but every cancellation then becomes a refund, which is slower for the guest and costs fees.',
+          'Authorizing first means a failed or abandoned booking never needs a refund. Capturing immediately is simpler, but every cancellation then becomes a refund, which is slower for the guest and costs fees. An authorization does not last until a stay booked months ahead, so those bookings capture a deposit now or re-authorize before the hold on the card lapses.',
         nodes: ['claims', 'payments'],
         travel: [['claims', 'payments']],
         short: 'Authorize',
@@ -240,7 +240,7 @@ export const bookingSystem: Design = {
         narration:
           'The state change and an outbox row are written in the same transaction. A worker publishes the event: confirmation email, host notification, analytics.',
         tradeoff:
-          'Sending emails inside the transaction risks notifying about a booking that was rolled back. The outbox adds a table and a worker, and guarantees every committed change is announced exactly once in effect.',
+          'Sending emails inside the transaction risks notifying about a booking that was rolled back. The outbox adds a table and a worker, and guarantees every committed change is published at least once. The worker can publish the same row twice after a crash, so consumers deduplicate by event id.',
         nodes: ['booking', 'events'],
         travel: [['booking', 'events']],
         short: 'Events',
