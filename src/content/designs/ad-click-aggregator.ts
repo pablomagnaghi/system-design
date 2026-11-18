@@ -17,7 +17,7 @@ export const adClickAggregator: Design = {
       'Handle tens of thousands of clicks per second, with spikes several times higher.',
       'The redirect adds only a few milliseconds and never fails because analytics is slow.',
       'Counts show up in queries within about a minute.',
-      'Billing-grade accuracy: no lost clicks and no double counting, reconciled daily.',
+      'Billing-grade accuracy: no double counting and no lost clicks once a click reaches the stream, reconciled daily.',
     ],
     outOfScope: [
       'Choosing which ad to show (the ad auction).',
@@ -179,7 +179,7 @@ export const adClickAggregator: Design = {
         narration:
           'The click is appended to a replicated stream partitioned by ad id. The service only waits for the append to be acknowledged, not for any counting.',
         tradeoff:
-          'Writing to a stream instead of a database keeps the redirect fast and absorbs traffic spikes. If the stream itself is unreachable, the service buffers clicks to local disk and still redirects, trading a delay in counts for never breaking the user’s click.',
+          'Writing to a stream instead of a database keeps the redirect fast and absorbs traffic spikes. If the stream itself is unreachable, the service buffers clicks to local disk and still redirects, trading a delay in counts for never breaking the user’s click. A host that dies before its buffer drains takes those few clicks with it, a rare loss the design accepts.',
         nodes: ['click', 'stream'],
         travel: [['click', 'stream']],
         short: 'Stream',
@@ -226,14 +226,14 @@ export const adClickAggregator: Design = {
         load: { agg: 45 },
       },
       {
-        title: 'Write exactly once',
+        title: 'Exactly-once effect in the sink',
         narration:
-          'The aggregator checkpoints its stream offsets and its state together, and writes each minute as an upsert keyed by ad, minute and dimensions.',
+          'The aggregator checkpoints its stream offsets and its state together, and writes each minute as an upsert keyed by ad, minute and dimensions. Each upsert carries the full count for that minute, not an increment.',
         tradeoff:
-          'Checkpoints plus idempotent upserts mean a restart replays from the last checkpoint and rewrites the same rows, so nothing is counted twice. It requires a sink that supports upserts and some care in the checkpoint interval, which trades recovery time against overhead.',
+          'Checkpoints plus idempotent upserts mean a restart replays from the last checkpoint and overwrites the same rows with the same full counts. Events are processed at least once, but nothing is counted twice. It requires a sink that supports upserts and some care in the checkpoint interval, which trades recovery time against overhead.',
         nodes: ['agg', 'olap'],
         travel: [['agg', 'olap']],
-        short: 'Exactly once',
+        short: 'Idempotent sink',
         metrics: {
           users: '10M',
           requestsPerSecond: '20K',
@@ -323,7 +323,7 @@ export const adClickAggregator: Design = {
         },
       ],
       choice:
-        'Write to the stream with a short timeout and fall back to a local disk buffer. The redirect never waits long, and the daily reconciliation catches anything that slipped.',
+        'Write to the stream with a short timeout and fall back to a local disk buffer. The redirect never waits long, and a shipper drains the buffer into the stream when it recovers. The daily reconciliation reads the raw store, which is fed by the stream, so it corrects counting errors but cannot recover a click that never reached the stream. A host lost with an undrained buffer loses those clicks; the design accepts that rare loss, keeps the buffer small by draining fast, and alerts when it grows.',
     },
     {
       question: 'How do we handle a popular ad that floods one partition?',
@@ -340,7 +340,7 @@ export const adClickAggregator: Design = {
         },
       ],
       choice:
-        'Partition by ad id, and add a random salt only for ads detected as hot, keyed so a given impression always lands on the same sub-partition. A small merge step sums the salted counts per minute.',
+        'Partition by ad id, and add a salt only for ads detected as hot. The salt is a hash of the impression id, so a given impression always lands on the same sub-partition. A small merge step sums the salted counts per minute.',
     },
     {
       question: 'Where do we compute the aggregates?',
