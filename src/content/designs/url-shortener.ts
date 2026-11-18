@@ -4,7 +4,7 @@ export const urlShortener: Design = {
   slug: 'url-shortener',
   title: 'URL shortener',
   summary:
-    'Turn long links into short codes and redirect every click in a few milliseconds, with codes that never collide, reads that scale far beyond writes and click counts that never slow a redirect down.',
+    'Turn long links into short codes and redirect every click in about ten milliseconds, with codes that never collide, reads that scale far beyond writes and click counts that never slow a redirect down.',
   difficulty: 'Easy',
   minutes: 8,
   requirements: {
@@ -14,7 +14,7 @@ export const urlShortener: Design = {
       'Show the owner how many times a link was clicked.',
     ],
     nonFunctional: [
-      'Redirects in a few milliseconds at the server, at hundreds of thousands per second.',
+      'Redirects in about ten milliseconds at the server (p95), at a peak of about a hundred thousand per second.',
       'Reads outnumber writes by about a hundred to one; billions of links stored over time.',
       'Codes are unique and short: seven characters or fewer.',
       'Redirects stay up even when link creation or analytics are degraded.',
@@ -135,7 +135,7 @@ export const urlShortener: Design = {
         narration:
           'Each shorten server leases a block of, say, ten thousand IDs from the allocator and hands them out locally. The next free ID is encoded in base 62, so seven characters cover trillions of links.',
         tradeoff:
-          'A counter guarantees uniqueness without checking the store, and leasing ranges means the allocator is touched once every ten thousand links. The cost is that codes are sequential and guessable, and a crashed server wastes the rest of its range; both are usually acceptable, and a reversible shuffle can hide the order.',
+          'A counter guarantees uniqueness without checking the store, as long as the allocator durably records each lease before it hands the range out, and leasing ranges means the allocator is touched once every ten thousand links. The cost is that codes are sequential and guessable, and a crashed server wastes the rest of its range; both are usually acceptable, and a reversible shuffle can hide the order.',
         nodes: ['shorten', 'ids'],
         travel: [['shorten', 'ids', 'lease']],
         short: 'Next ID',
@@ -196,7 +196,7 @@ export const urlShortener: Design = {
         narration:
           'A cache joins the read path. The redirect service looks the code up in memory first, and because link popularity is very skewed, a modest cache holding the hottest codes answers the large majority of clicks.',
         tradeoff:
-          'Links almost never change, so caching them is safe and staleness is barely a concern. The cost is memory and one more system to run; a TTL of hours bounds how long an expired or deleted link can keep redirecting.',
+          'Links almost never change, so caching them is safe and staleness is barely a concern. The cost is memory and one more system to run; a deleted link keeps redirecting until its cached entry is invalidated, or for the TTL of hours if the invalidation is lost. Expiry needs no invalidation, because the expiry time is cached with the entry and checked on every read.',
         nodes: ['redirect', 'cache'],
         travel: [['redirect', 'cache']],
         short: 'Cache hit',
@@ -308,7 +308,7 @@ export const urlShortener: Design = {
         },
         {
           name: '302 temporary',
-          pros: 'Every click is counted, and expiry or takedown works at once.',
+          pros: 'Every click reaches us, so it can be counted, and expiry or takedown takes effect once cached entries are invalidated or expire.',
           cons: 'Every click costs a request to our servers.',
         },
       ],
@@ -326,7 +326,7 @@ export const urlShortener: Design = {
         {
           name: 'Small local cache in each redirect server',
           pros: 'The hot code is served from process memory everywhere.',
-          cons: 'A deleted link may keep redirecting for the local TTL.',
+          cons: 'A deleted link may keep redirecting for the local TTL, since local entries cannot be invalidated.',
         },
         {
           name: 'Short edge caching of the 302',
@@ -340,4 +340,178 @@ export const urlShortener: Design = {
   ],
   wrapUp:
     'Leased ID ranges encoded in base 62 for collision-free codes, a key-value store by code, a read-through cache with negative entries in front of it, 302 redirects from a stateless fleet, and click counting through a stream that never slows a redirect.',
+  guarantees: {
+    provides: [
+      {
+        property: 'Code uniqueness',
+        promise:
+          'A code maps to at most one link, forever. The allocator records the new high-water mark with a synchronously replicated, conditional write before it returns a range, so ranges are disjoint; the shuffle is a bijection, so distinct IDs give distinct codes. Every insert, generated or custom, is a put-if-absent, which settles alias races and catches a generated code that lands on an existing alias: the server skips that ID and takes the next one.',
+      },
+      {
+        property: 'Durability of a created link',
+        promise:
+          'A link is acknowledged only after the store has written it to a quorum of replicas in different zones. A create that fails or times out may or may not exist, and a retry gets a new code rather than a duplicate of the old one.',
+      },
+      {
+        property: 'Redirect freshness',
+        promise:
+          'Redirects are eventually consistent with bounded staleness. Expiry is enforced on every read, cached or not, to within clock skew. A deleted link stops redirecting once the shared entry is invalidated and the local caches age out, which is seconds; if the invalidation is lost, the bound is the shared TTL of hours.',
+      },
+      {
+        property: 'Click counting',
+        promise:
+          'Best effort into the stream: the redirect server emits each event at most once and drops it if the stream is unavailable. From the stream to the counts, events are processed at least once, made harmless by storing each partition offset in the same transaction as the counts it produced. Counts can therefore run low, never high.',
+      },
+      {
+        property: 'Redirect availability',
+        promise:
+          'The redirect path depends only on the cache and the link store. An outage of the shorten service, the allocator, the click stream or the aggregator does not fail a redirect.',
+      },
+    ],
+    assumes: [
+      'The allocator keeps its high-water mark in a store with consensus or synchronous replication, so a failover never rolls it back.',
+      'The link store offers a conditional insert and quorum writes across at least three zones.',
+      'Server clocks are synchronized to well under a second, since expiry is compared against local time.',
+      'Links are immutable apart from deletion and expiry, which is what makes hours-long caching safe.',
+      'Link popularity is heavily skewed, so a cache far smaller than the store answers most clicks.',
+    ],
+    doesNotGuarantee: [
+      'Unguessable codes. The shuffle hides creation order but is not a secret; private links need long random tokens or an access check.',
+      'Exact click counts. Events are dropped when the stream is down or a redirect server dies with events still in memory, so counts are not fit for billing.',
+      'Instant takedown. A deleted link can redirect for a few seconds, and for hours in the worst case of a lost invalidation.',
+      'One code per URL. Shortening the same URL twice, or retrying a timed-out create, gives two codes.',
+      'Dense IDs. A crashed or restarted server abandons the rest of its range.',
+    ],
+  },
+  failures: [
+    {
+      scenario: 'A shared cache node is lost, or the whole cache restarts cold.',
+      impact:
+        'The clicks that node answered become store reads. Losing the entire cache sends close to the full click rate to a store sized for the miss rate, so latency climbs and some redirects time out, as in the viral stage.',
+      detection:
+        'Cache hit ratio falling below its normal band, with store read latency and throttled reads rising at the same time.',
+      recovery:
+        'Consistent hashing limits a node loss to that node’s share of keys. Local caches keep the hottest codes for a few seconds, each redirect server collapses concurrent misses for one code into a single store read, and a cap on in-flight store reads sheds the excess as fast errors. The cache refills from clicks within minutes; no data is lost because the cache holds nothing the store does not.',
+    },
+    {
+      scenario:
+        'A shorten server crashes between taking an ID and answering the client, before or after the store write.',
+      impact:
+        'Before the write, the ID is wasted along with the rest of the range. After the write, the link exists but the client never learns its code and retries, which creates a second link for the same URL.',
+      detection:
+        'A gap between IDs leased and links stored, tracked as a ratio. It needs no alarm unless it grows, which would point at a crash loop burning ranges.',
+      recovery:
+        'The restarted server leases a fresh range; the old one is never reissued. The orphan link is valid and harmless and stays until it expires. A caller that cannot tolerate duplicates sends an idempotency key, stored with the link and checked on retry.',
+    },
+    {
+      scenario: 'The allocator fails over to a replica.',
+      impact:
+        'Shorten servers keep creating from the ranges they already hold, which lasts minutes at peak rates, then creates fail; redirects are unaffected. If the high-water mark were replicated asynchronously, the new primary could issue a range a second time.',
+      detection:
+        'Lease error rate and lease latency for the outage. For a reissued range, a counter of put-if-absent conflicts on generated codes, which is otherwise near zero and alarms on any burst.',
+      recovery:
+        'With synchronous replication the new primary continues from the last recorded mark. If a range is reissued anyway, the conditional insert rejects each duplicate, the server abandons the range and leases another, and no link is overwritten.',
+    },
+    {
+      scenario:
+        'A link is deleted, and the cache invalidation is lost or races with a fill from a reader that saw the old row.',
+      impact:
+        'The link keeps redirecting from the shared cache, for up to the TTL of hours. For a takedown of a harmful target, that is the worst case that matters.',
+      detection:
+        'A verification step in the delete flow that requests the code through the redirect path a few seconds later and expects a 404, plus a count of invalidations that exhausted their retries.',
+      recovery:
+        'The delete marks the row deleted in the store first, then overwrites the cache entry with a "deleted" marker instead of removing the key, and fills only add a key that is absent, so a late fill cannot replace the marker. Failed invalidations are retried from a queue. Local caches clear on their own within seconds.',
+    },
+    {
+      scenario: 'The click stream is unavailable or slow to accept events.',
+      impact:
+        'Redirects are unaffected. Events queue in a small bounded buffer on each redirect server and are dropped when it fills, so counts for that window are low.',
+      detection:
+        'A dropped-events counter on the redirect servers and the produce error rate. Comparing daily counts against gateway request logs shows the size of the gap.',
+      recovery:
+        'Counting resumes when the stream returns. The gap is permanent unless it is backfilled from the request logs, which is a batch job run only for outages large enough to matter.',
+    },
+    {
+      scenario: 'The aggregator crashes after reading a batch of clicks, or falls far behind.',
+      impact:
+        'Stats stop advancing or lag by minutes instead of seconds. No redirect is affected and no event is lost while the stream retains it.',
+      detection:
+        'Consumer lag per partition, alarmed well before it approaches the stream’s retention period.',
+      recovery:
+        'A restarted consumer resumes from the offset stored with the counts, so a batch that was applied is not applied again and one that was not is replayed. Lag is worked off by adding consumers up to the partition count.',
+    },
+  ],
+  capacity: {
+    assumptions: [
+      'About 400 new links per second on average, and 100 clicks for every link created.',
+      'Peak click rate is about 2.5 times the average, driven by viral links rather than time of day.',
+      'A stored link takes about 500 bytes (a long URL, metadata and store overhead), kept for five years with three replicas.',
+      'About 100 million distinct codes are clicked on a given day, and a cached entry takes about 300 bytes.',
+      'A click event is about 100 bytes and the stream retains seven days.',
+      'A redirect server handles about 5,000 requests per second when most are cache hits.',
+    ],
+    estimates: [
+      {
+        label: 'Redirect rate',
+        value: '~40K per second average, ~100K peak',
+        math: '400 creates/s × 100 = 40,000 clicks/s; × 2.5 peak factor = 100,000/s. About 3.5 billion clicks per day.',
+      },
+      {
+        label: 'Code space',
+        value: '~63 billion links in five years, under 2% of seven characters',
+        math: '400/s × 86,400 s ≈ 35M links/day × 365 × 5 ≈ 63B. 62^7 ≈ 3.5 trillion, so 63B ÷ 3.5T ≈ 1.8%.',
+      },
+      {
+        label: 'Link storage',
+        value: '~32 TB logical, ~95 TB replicated',
+        math: '63B links × 500 bytes ≈ 32 TB; × 3 replicas ≈ 95 TB.',
+      },
+      {
+        label: 'Cache memory',
+        value: '~30 GB for a day of active codes',
+        math: '100M distinct codes × 300 bytes = 30 GB, against 63B × 500 bytes in the store: about 0.1% of the data.',
+      },
+      {
+        label: 'Store reads at peak',
+        value: '~5K per second with the cache, 100K without',
+        math: '100,000 clicks/s × 5% miss rate = 5,000 reads/s.',
+      },
+      {
+        label: 'Click stream',
+        value: '~10 MB/s at peak, ~2.5 TB retained, 16 partitions',
+        math: '100,000 events/s × 100 bytes = 10 MB/s. 3.5B/day × 100 bytes = 350 GB/day × 7 days ≈ 2.5 TB before replication. 100K/s ÷ ~10K/s per consumer = 10, rounded up to 16.',
+      },
+      {
+        label: 'Redirect fleet',
+        value: '~30 servers across three zones',
+        math: '100,000/s ÷ 5,000/s per server = 20 servers; × 1.5 so that losing one zone of three still leaves 20.',
+      },
+    ],
+    implications: [
+      'Reads outnumber writes 100 to 1 and the active set is about 0.1% of the data, so a cache that fits on a few nodes takes about 95% of the read load. The store is sized for storage and the miss rate, not for the click rate.',
+      'The store must survive a cold cache badly but not fatally: 100K reads per second against capacity planned for 5K is why miss coalescing and load shedding exist.',
+      'Five years of links use under 2% of the seven-character space, so codes are never reused and abandoned ranges cost nothing that matters.',
+      'At 400 creates per second and 10,000 IDs per lease, the allocator sees one request every 25 seconds. It can be a single small replicated counter, and it never needs to scale.',
+      'Clicks are the largest write stream by two orders of magnitude (40K per second against 400), which is why they go to a log and are aggregated in batches rather than written as rows.',
+      'One viral link can be most of the click stream. Counts are sums, so events are spread across partitions at random rather than keyed by code, and the aggregator groups by code; no partition becomes hot.',
+    ],
+  },
+  evolution: {
+    mvp: 'One service and one relational database: a table keyed by code with a unique index, IDs from a database sequence, a small in-process cache, and click counts updated from request logs by a periodic job. That serves a few thousand redirects per second and has almost nothing to operate. The code format, the 302 and the rule that codes are never reused are fixed from day one, because they are the parts that cannot change later.',
+    atScale: [
+      'At 10x (about a million redirects per second at peak), one region is no longer close enough to users or large enough to be the only copy. The link store replicates to several regions and redirects are served locally; creates stay in one home region, or each region leases its own disjoint ranges from the allocator.',
+      'At 10x, hot codes are worth caching at the edge for a few seconds. That gives up counting in one place: clicks served at the edge are counted from edge logs and merged in the aggregator.',
+      'At 100x, the click pipeline is the dominant cost at hundreds of billions of events per day. Redirect servers pre-aggregate counts per code in memory and emit totals every second, and raw events are sampled for anything beyond counts.',
+      'At 100x, most stored links are cold. Links not clicked for months move to cheaper storage behind the same lookup, accepting a slower first redirect for them.',
+    ],
+    firstBottleneck:
+      'Reads on the link store, and specifically the one partition that holds a viral code, because adding nodes does not spread a single key. The cache removes it, and the pressure then moves to the single cache node that owns the hot key, which the local caches remove. After that the next limit is the click pipeline, since it is the only write that grows with the click rate.',
+    avoided: [
+      'Deduplicating by long URL. It needs a second index and a read before every write, and links with different owners and expiries are different links anyway. Worth adding only if storage cost or abuse by repeated shortening becomes a real problem.',
+      'Random unguessable codes. They turn every insert into a possible retry and are unnecessary for public links. Worth adding as a separate, longer token format when private links become a feature.',
+      'Multi-region writes. Creates are 1% of traffic and tolerate a cross-region hop, so a single home for writes avoids conflict handling. Worth adding when create latency or a regional outage of creation becomes a product concern.',
+      'Exact click counting, with acknowledged emits and deduplication by event ID. It would put a wait or a local durable buffer on the redirect path. Worth adding when counts drive billing.',
+      'A filter of all known codes in front of the cache. Negative caching already absorbs repeated bad codes; a filter earns its memory only when scanners send mostly distinct codes.',
+    ],
+  },
 };
