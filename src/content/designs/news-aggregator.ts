@@ -211,13 +211,13 @@ export const newsAggregator: Design = {
         nodes: ['scheduler', 'fetchers'],
         travel: [['scheduler', 'fetchers', 'due']],
         short: 'Adaptive poll',
-        metrics: { requestsPerSecond: '2K', p95Latency: '300 ms', errorRate: '0.5%' },
+        metrics: { requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.5%' },
         load: { scheduler: 20, fetchers: 30 },
       },
       {
         title: 'Fetch, then drop URLs already seen',
         narration:
-          'Fetchers send the validators from the last poll, so an unchanged feed answers with a tiny "not modified", and a per-domain limit caps requests to each publisher. Item URLs are canonicalized, known ones are dropped, and new items go onto a durable log.',
+          'Fetchers send the validators from the last poll, so an unchanged feed answers with a tiny "not modified", and a per-domain limit caps requests to each publisher. Item URLs are canonicalized, known ones are dropped, and new items go onto a durable log. A URL is marked known only after its item is appended, so a crash between the two steps repeats an item, which the fingerprint step folds, and never loses one.',
         tradeoff:
           'Downloading every feed in full and passing every item downstream is simpler, and makes the expensive steps reprocess the same article on every poll. A URL check is cheap and catches most repeats, and misses the same text under different URLs, which a later step handles.',
         nodes: ['publishers', 'fetchers', 'log'],
@@ -226,7 +226,7 @@ export const newsAggregator: Design = {
           ['fetchers', 'log', 'new items'],
         ],
         short: 'Fetch + filter',
-        metrics: { requestsPerSecond: '2K', p95Latency: '300 ms', errorRate: '0.5%' },
+        metrics: { requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.5%' },
         load: { fetchers: 35, log: 15 },
       },
       {
@@ -241,7 +241,7 @@ export const newsAggregator: Design = {
           ['push', 'log'],
         ],
         short: 'Push',
-        metrics: { requestsPerSecond: '2K', p95Latency: '300 ms', errorRate: '0.5%' },
+        metrics: { requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.5%' },
         load: { push: 15, log: 20 },
       },
       {
@@ -253,7 +253,7 @@ export const newsAggregator: Design = {
         nodes: ['log', 'extract'],
         travel: [['log', 'extract']],
         short: 'Dedup',
-        metrics: { requestsPerSecond: '2K', p95Latency: '300 ms', errorRate: '0.5%' },
+        metrics: { requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.5%' },
         load: { log: 20, extract: 55 },
         traffic: [{ edge: ['log', 'extract'], kind: 'heavy' }],
       },
@@ -269,7 +269,7 @@ export const newsAggregator: Design = {
           ['cluster', 'db'],
         ],
         short: 'Cluster',
-        metrics: { requestsPerSecond: '2K', p95Latency: '300 ms', errorRate: '0.5%' },
+        metrics: { requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.5%' },
         load: { extract: 50, cluster: 45, db: 20 },
       },
       {
@@ -284,7 +284,7 @@ export const newsAggregator: Design = {
           ['ranker', 'cache', 'pages'],
         ],
         short: 'Build pages',
-        metrics: { requestsPerSecond: '2K', p95Latency: '300 ms', errorRate: '0.5%' },
+        metrics: { requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.5%' },
         load: { db: 25, ranker: 40, cache: 15 },
       },
       {
