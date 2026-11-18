@@ -15,7 +15,7 @@ export const localDelivery: Design = {
     ],
     nonFunctional: [
       'Availability answers in about a hundred milliseconds; browsing outnumbers ordering by ten to a hundred to one.',
-      'Never sell a unit that is not on the shelf.',
+      'Never sell more units than the recorded stock; the shelf itself can differ from the record, and short picks handle that.',
       'On the order of ten thousand warehouses, a few thousand items each and millions of orders a day.',
       'Availability may lag stock by seconds; the order is where correctness is enforced.',
     ],
@@ -230,7 +230,7 @@ export const localDelivery: Design = {
       {
         title: 'Fill misses from read replicas',
         narration:
-          'A miss reads the warehouse stock from a read replica of the inventory database and refills the cache. Replicas trail the primary by a moment and carry none of the order writes.',
+          'A miss reads the warehouse stock from a read replica of the inventory database and refills the cache. Replicas trail the primary by a moment and take the read load off it. They still apply every order write through replication, so they scale reads, not writes.',
         tradeoff:
           'Reading misses from the primary would always be current and would compete with the transactions that matter most. Replicas add a small lag on top of the cache, which is acceptable because the order step checks stock again on the primary.',
         nodes: ['cache', 'replica', 'db'],
@@ -269,9 +269,9 @@ export const localDelivery: Design = {
       {
         title: 'Charge after the decrement',
         narration:
-          'With the units taken, the order API charges the customer using the idempotency key. On success the order is confirmed and goes to the warehouse for picking; on failure a second transaction puts the units back and cancels the order.',
+          'With the units taken, the order API charges the customer using the idempotency key. On success the order is confirmed and goes to the warehouse for picking; on a declined charge a second transaction cancels the order and puts the units back, only if the order is still pending, so the units cannot be returned twice.',
         tradeoff:
-          'Charging first would bill people for items that turn out to be gone. Decrementing first holds stock for the few seconds a payment takes, and the cost is a compensation step that must run even if the API crashes, so a sweeper releases orders stuck unpaid.',
+          'Charging first would bill people for items that turn out to be gone. Decrementing first holds stock for the few seconds a payment takes, and the cost is a compensation step that must run even if the API crashes or the charge times out with an unknown result. A sweeper takes orders still pending past a deadline, asks the payment provider for the charge by its idempotency key, confirms the ones that were paid and releases only the ones that were not.',
         nodes: ['orders', 'payments', 'db'],
         travel: [
           ['orders', 'payments', 'charge'],
@@ -381,5 +381,5 @@ export const localDelivery: Design = {
     },
   ],
   wrapUp:
-    'Find reachable warehouses with a radius prefilter and a cached travel-time check, serve stock from a short-lived cache over read replicas, decrement every order line conditionally in one transaction on a regional primary, charge after the decrement with a compensating release, and let warehouse staff keep the counts honest.',
+    'Find reachable warehouses with a radius prefilter and a cached travel-time check, serve stock from a short-lived cache over read replicas, decrement every order line conditionally in one transaction on a regional primary, charge after the decrement with a compensating release that first checks the payment status, and let warehouse staff keep the counts honest.',
 };
