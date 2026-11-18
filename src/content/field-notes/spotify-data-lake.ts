@@ -185,7 +185,7 @@ export const spotifyDataLake: FieldNote = {
       {
         title: 'Look up, then read in parallel',
         narration:
-          'The new reader looks the key up in the index, maps row numbers to page offsets with cached file metadata, and fires ranged reads for exactly those pages, all at once. No SQL engine sits in the path, and no read waits for another, so the query costs about one storage round trip.',
+          'The new reader looks the key up in the index, maps row numbers to page offsets with cached file metadata, and fires ranged reads for exactly those pages, all at once. No SQL engine sits in the path, and no data read waits for another, so after the index lookup and the cached metadata step the query costs about one storage round trip.',
         tradeoff:
           'Dropping the engine removes seconds of overhead, but the reader only answers lookups by indexed key. On files written the usual way it still fetches whole pages, which the post says can mean a 4 MB page to return 100 bytes.',
         nodes: ['app', 'reader', 'index', 'meta', 'lake'],
@@ -235,7 +235,7 @@ export const spotifyDataLake: FieldNote = {
         narration:
           'BigQuery keeps scanning the same files for reports while services and agents read single keys through the index. Extra lookup dimensions get their own secondary index over the same entries, added or dropped without rewriting any data.',
         tradeoff:
-          'There is no second store, ETL or storage bill, so history and long-tail data become cheap to serve online. The layout still favors the key the files were sorted by, so lookups on other keys touch more files.',
+          'There is no second copy of the data, no ETL into a serving store and no second storage bill, only the index as an extra artifact, so history and long-tail data become cheap to serve online. The layout still favors the key the files were sorted by, so lookups on other keys touch more files.',
         nodes: ['sql', 'lake', 'reader', 'index'],
         travel: [
           ['sql', 'lake'],
