@@ -16,7 +16,7 @@ export const proximitySearch: Design = {
     nonFunctional: [
       'Search answers in under about 200 ms.',
       'Read heavy: searches outnumber edits by a hundred to one or more.',
-      'Scale to around a hundred million places and hundreds of millions of searches a day.',
+      'Scale to around a hundred million places and about a billion searches a day, around 20K a second at peak.',
       'Edits can take a few minutes to appear in search.',
     ],
     outOfScope: [
@@ -159,7 +159,7 @@ export const proximitySearch: Design = {
       {
         title: 'Cache popular areas',
         narration:
-          'The point is rounded to a geo cell, and the cell, radius and category form a cache key. City centers and common searches are answered without touching the index.',
+          'The point is rounded to a geo cell, and the cell, radius and category form a cache key. City centers and common searches are answered without touching the index. Entries live for about a minute, so an edit reaches cached results within the few minutes the requirements allow.',
         tradeoff:
           'Rounding the point means nearby users share a cache entry, which raises the hit rate a lot. The cost is that results are for the cell, not the exact point, so the final distance sort still runs on the user point.',
         nodes: ['api', 'cache'],
@@ -171,7 +171,7 @@ export const proximitySearch: Design = {
       {
         title: 'Cover the circle with cells',
         narration:
-          'On a miss, the service picks a geohash length whose cells are about the size of the radius, and reads the cell of the point plus its eight neighbors. Each cell lists the places inside it.',
+          'On a miss, the service picks a geohash length whose cells are at least as wide and as tall as the radius, and reads the cell of the point plus its eight neighbors. Each cell lists the places inside it.',
         tradeoff:
           'Reading only the cell of the point misses places just across its edge. Adding the neighbors fixes that at the cost of reading nine cells, which is still a handful of lookups in memory.',
         nodes: ['api', 'geo'],
@@ -185,7 +185,7 @@ export const proximitySearch: Design = {
         narration:
           'The cells return candidates with their coordinates. The service drops those outside the real circle or in the wrong category, then sorts by distance.',
         tradeoff:
-          'Cells are squares and the search is a circle, so cells alone return extra places. Computing the exact distance on a few hundred candidates is cheap, and keeps the index simple instead of trying to make it exact.',
+          'Cells are rectangles and the search is a circle, so cells alone return extra places. Computing the exact distance on a few hundred candidates is cheap, and keeps the index simple instead of trying to make it exact.',
         nodes: ['geo', 'filter'],
         travel: [['geo', 'filter', 'candidates']],
         short: 'Exact distance',
@@ -222,9 +222,9 @@ export const proximitySearch: Design = {
       {
         title: 'Stream changes into the index',
         narration:
-          'A change stream from the database feeds every search node, which moves the place from its old cell to its new one.',
+          'A change stream from the database feeds every search node, which moves the place from its old cell to its new one. A node applies a change only if its version is newer than the one it holds.',
         tradeoff:
-          'Rebuilding the whole index on a schedule is simpler but makes edits wait hours. Streaming changes keeps the delay to seconds or minutes, at the cost of handling missed or reordered events, which a periodic full rebuild also covers.',
+          'Rebuilding the whole index on a schedule is simpler but makes edits wait hours. Streaming changes normally keeps the delay to seconds or minutes, at the cost of handling missed or reordered events, which a periodic full rebuild also covers. The stream can fall behind without limit, so each node measures its lag and one that is too far behind is alerted on and taken out of rotation until it catches up.',
         nodes: ['db', 'cdc', 'geo'],
         travel: [
           ['db', 'cdc'],
@@ -239,7 +239,7 @@ export const proximitySearch: Design = {
         narration:
           'The same change stream removes the edited place from the details cache, so the next search reads it fresh.',
         tradeoff:
-          'A short time to live alone would serve old details for its whole length. Invalidating on change is more precise, and the time to live remains as a safety net if an event is lost.',
+          'A short time to live alone would serve old details for its whole length. Invalidating on change is more precise. A read that fetched the old row just before the change can still fill the cache after the removal, so the time to live stays, short enough to bound that race and a lost event.',
         nodes: ['cdc', 'details'],
         travel: [['cdc', 'details', 'invalidate']],
         short: 'Invalidate',
@@ -350,5 +350,5 @@ export const proximitySearch: Design = {
     },
   ],
   wrapUp:
-    'A lean geohash index in memory on every node finds candidates, an exact distance check sorts them, a details cache fills them in, and a change stream keeps the index a few minutes behind the database at most.',
+    'A lean geohash index in memory on every node finds candidates, an exact distance check sorts them, a details cache fills them in, and a change stream normally keeps the index within a few minutes of the database, with lag measured on every node.',
 };
