@@ -129,7 +129,7 @@ export const figmaMultiplayer: FieldNote = {
       {
         title: 'Same property: last write wins',
         narration:
-          'A and B change the same property of the same shape. The server keeps the value it received last and sends it to everyone, so A sees its own change replaced. Edits to different properties, or to different objects, never conflict at all.',
+          'A and B change the same property of the same shape. The server keeps the value it received last and sends it to everyone, so A sees its own change replaced. Changes to different properties, or to the same property on different objects, do not conflict under this rule. Deleting and moving objects can still clash across objects, and later stages give them their own rules.',
         tradeoff:
           'Last writer wins per property is cheap and always converges. The price is that two edits to one value are never merged: if two people rename the same layer at once, one name survives whole and the other is lost.',
         nodes: ['a', 'server', 'b', 'props'],
@@ -144,11 +144,11 @@ export const figmaMultiplayer: FieldNote = {
         traffic: [{ edge: ['a', 'server'], kind: 'failed' }],
       },
       {
-        title: 'Ignore stale echoes',
+        title: 'Pending edits win on the client',
         narration:
           'A client applies its own edits at once so the editor feels instant. While an edit is unacknowledged, an older value from the server could arrive and briefly paint over it. So the client drops incoming updates to any property it has changed and not yet heard back about.',
         tradeoff:
-          "The client's pending value is its best guess of the final state, so dropping conflicting echoes removes flicker at no cost to convergence: the server's answer arrives right after. The client has to track which properties are in flight, which adds a little bookkeeping.",
+          "The client's pending value is its best guess of the final state, so dropping the conflicting incoming updates removes flicker at no cost to convergence: the server's answer arrives right after. The client has to track which properties are in flight, which adds a little bookkeeping.",
         nodes: ['a', 'pending', 'server'],
         travel: [
           ['a', 'pending'],
@@ -244,7 +244,7 @@ export const figmaMultiplayer: FieldNote = {
     'Comments, users and projects live in a separate system on Postgres, so the product runs two sync paths with different rules.',
   ],
   takeaways: [
-    'If you have a central server, you do not need full CRDTs or operational transforms: let the server order edits and keep the simple merge rules.',
+    'If you have a central server and most edits replace a whole value, you do not need full CRDTs or operational transforms: let the server order edits and keep the simple merge rules. Ordering alone does not merge two edits inside one value, such as text.',
     'Model the document as object, property and value, and resolve conflicts per property with last writer wins.',
     'Let clients create IDs that embed a client ID, so creation works offline and never collides.',
     'Store order as fractions between neighbors, so an insert or move changes only the moved item.',
