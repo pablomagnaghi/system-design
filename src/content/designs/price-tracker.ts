@@ -15,8 +15,8 @@ export const priceTracker: Design = {
     ],
     nonFunctional: [
       'Hundreds of millions of products and tens of millions of alerts.',
-      'Popular products refreshed every few minutes to an hour, the long tail about once a day.',
-      'An alert arrives within minutes of a drop, once per drop, and never for a price that was a glitch.',
+      'Popular products refreshed every few minutes to an hour, the long tail about once a week.',
+      'An alert arrives within minutes of the refresh that sees the drop, once per drop, and a drop that looks like a glitch is confirmed by a second fetch before anyone is told.',
       'Stay within each store’s rate limits and terms.',
     ],
     outOfScope: [
@@ -176,9 +176,9 @@ export const priceTracker: Design = {
       {
         title: 'Spend the budget where people look',
         narration:
-          'Every product has a next check time computed from how many alerts it has, how often its price moved recently and how often it is viewed. The scheduler picks the products that are due, so a popular item is checked every few minutes and a forgotten one once a day.',
+          'Every product has a next check time computed from how many alerts it has, how often its price moved recently and how often it is viewed. The scheduler picks the products that are due, so a popular item is checked every few minutes and a forgotten one once a week. At about 3K fetches a second the budget is roughly 250 million fetches a day, so a weekly floor over about 300 million products takes around a sixth of it and the rest goes to watched products.',
         tradeoff:
-          'Checking every product on the same cycle spreads the budget evenly over items nobody watches. A priority schedule keeps watched prices fresh within the same fetch budget; the cost is that a quiet product may change unnoticed for a day, which hurts few people.',
+          'Checking every product on the same cycle spreads the budget evenly over items nobody watches. A priority schedule keeps watched prices fresh within the same fetch budget; the cost is that a quiet product may change unnoticed for a week, which hurts few people.',
         nodes: ['products', 'scheduler'],
         travel: [['products', 'scheduler', 'priority']],
         short: 'Priority',
@@ -225,7 +225,7 @@ export const priceTracker: Design = {
       {
         title: 'Store only changes',
         narration:
-          'The fetcher compares the new price with the current one. If they match, only the last checked time moves. If they differ, it updates the current price and appends one row to the history, keyed by product and time.',
+          'The fetcher compares the new price with the current one. If they match, only the last checked time moves. If they differ, it updates the current price and writes an outbox row carrying a change id in one transaction, then appends one row to the history, keyed by product and time.',
         tradeoff:
           'Storing every reading would multiply history by the number of checks, while most prices stay flat for weeks. Storing changes keeps history small and charts cheap; the cost is that "price at time t" means finding the last change before t, and gaps in checking are invisible unless last checked is kept.',
         nodes: ['fetchers', 'products', 'history'],
@@ -240,7 +240,7 @@ export const priceTracker: Design = {
       {
         title: 'Publish changes to a stream',
         narration:
-          'Each change becomes an event with product, old price, new price and a change id, on a stream partitioned by product. The alert matcher reads it in order per product.',
+          'Each change becomes an event with product, old price, new price and a change id, on a stream partitioned by product. A relay publishes each outbox row, and repeats the history append if it is missing, until both are done, so a fetcher crash delays a change instead of losing its alerts. Delivery is at least once, made harmless by the change id. The alert matcher reads it in order per product.',
         tradeoff:
           'Matching inside the fetcher would make crawling wait on alert work and lose matches when a fetcher crashes. A stream decouples the two and lets the matcher catch up after a store-wide sale floods it; the cost is a few seconds of extra delay.',
         nodes: ['fetchers', 'changes', 'matcher'],
@@ -280,7 +280,7 @@ export const priceTracker: Design = {
       {
         title: 'Notify once, then re-arm',
         narration:
-          'Each match becomes a notification job with the key alert id plus change id, so a replayed event sends nothing new. The alert records the price it fired at, and fires again only for a lower price or after the price climbs back above the target.',
+          'Each match becomes a notification job with the key alert id plus change id, so a replayed event produces the same job and the notification service drops the repeat by that key. The alert records the price it fired at, and fires again only for a lower price or after the price climbs back above the target.',
         tradeoff:
           'Firing on every matching change would message the same user each time the price wobbles by a cent. Remembering the last fired price costs a write per notification, and turns a noisy price into one alert per real drop.',
         nodes: ['matcher', 'notify', 'alerts'],
@@ -292,7 +292,7 @@ export const priceTracker: Design = {
       {
         title: 'Serve history from a cache',
         narration:
-          'Opening a product shows its chart. The API reads a downsampled series, such as the daily low and high for a year, from a cache that is filled from the history store on a miss and refreshed when the price changes.',
+          'Opening a product shows its chart. The API reads a downsampled series, such as the daily low and high for a year, from a cache that is filled from the history store on a miss and refreshed when the price changes. A fill can race a refresh and keep an older series, so entries also expire after a short TTL.',
         tradeoff:
           'Returning every raw change for a five-year chart sends far more points than a screen can draw. Downsampled series cost a precompute step and lose detail inside a day, which a zoomed-in view can fetch separately.',
         nodes: ['user', 'api', 'charts', 'history'],
@@ -314,7 +314,7 @@ export const priceTracker: Design = {
         {
           name: 'Round robin over every product',
           pros: 'Simple and fair; every product is checked eventually.',
-          cons: 'Hundreds of millions of products means each one waits days, including the ones thousands of people watch.',
+          cons: 'Hundreds of millions of products at a few thousand fetches a second means each one waits about a day, including the ones thousands of people watch.',
         },
         {
           name: 'Priority by demand and volatility',
@@ -328,7 +328,7 @@ export const priceTracker: Design = {
         },
       ],
       choice:
-        'Priority scheduling with a daily floor for every product, plus browser reports used as hints that pull a product forward in the queue rather than as prices to trust directly.',
+        'Priority scheduling with a weekly floor for every product, plus browser reports used as hints that pull a product forward in the queue rather than as prices to trust directly.',
     },
     {
       question: 'How do we match a price change to millions of alerts?',
@@ -372,7 +372,7 @@ export const priceTracker: Design = {
         },
       ],
       choice:
-        'Both of the last two: confirm drops that look implausible, and fire each alert once per drop with a key of alert id plus change id, re-arming only when the price rises back above the target.',
+        'Both of the last two: confirm drops that look implausible, and fire each alert once per drop with a key of alert id plus change id. An alert that has fired fires again only for a still lower price, or after the price rises back above the target and re-arms it.',
     },
   ],
   wrapUp:
