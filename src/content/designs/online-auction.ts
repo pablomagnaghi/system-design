@@ -15,7 +15,7 @@ export const onlineAuction: Design = {
       'When the auction ends, the highest bidder wins and both sides are notified.',
     ],
     nonFunctional: [
-      'Strong consistency for bids: an accepted bid is never lost and a lower bid never wins.',
+      'Strong consistency for bids: a bid is acknowledged only after a synchronously replicated commit, so an accepted bid survives a failover, and a lower bid never wins.',
       'Bids are acknowledged in well under a second.',
       'Scale to millions of open auctions, with a few hot ones getting many bids per second near the end.',
       'The close is fair: no bid accepted after the end, no valid bid rejected before it.',
@@ -168,9 +168,9 @@ export const onlineAuction: Design = {
       {
         title: 'Place a bid with a key',
         narration:
-          'A bidder submits an amount with an idempotency key, so a double click or a retry on a bad connection cannot become two bids.',
+          'A bidder submits an amount with an idempotency key, so a double click or a retry on a bad connection cannot become two bids. The key is stored with the bid under a unique constraint, in the same transaction.',
         tradeoff:
-          'Without the key, a retry after a timeout could place a second, higher bid the user never meant. Storing keys costs a lookup per bid, which is small next to the harm of an unintended bid.',
+          'Without the key, a retry after a timeout is judged as a new bid: it fails against the bidder’s own first attempt, and a bidder who is actually leading is told they lost. With the key, the retry returns the stored result. Storing keys costs a lookup per bid, which is small next to the harm of a wrong answer.',
         nodes: ['bidder', 'api'],
         travel: [['bidder', 'api']],
         short: 'Bid + key',
@@ -180,9 +180,9 @@ export const onlineAuction: Design = {
       {
         title: 'Accept only a higher bid',
         narration:
-          'The service runs one conditional update: set the highest bid to this amount where the current highest is lower and the end time has not passed. If no row changes, the bid lost and the bidder gets the current price.',
+          'The service runs one conditional update: set the highest bid to this amount where the current highest is lower and the end time has not passed, judged by the database clock and not by the clock of whichever API server took the bid. If no row changes, the bid lost and the bidder gets the current price.',
         tradeoff:
-          'Reading the price and then writing leaves a gap where two bids both think they win. Locking the row closes the gap but makes bids wait in line. The conditional update lets the database decide atomically, and only the losing bid pays with a retry.',
+          'Reading the price and then writing leaves a gap where two bids both think they win. Locking the row explicitly before reading closes the gap, but holds the lock across round trips to the application while bids wait in line. The conditional update takes the same row lock inside the database, only for one short transaction, and lets the database decide atomically; only the losing bid pays with a retry.',
         nodes: ['api', 'auction'],
         travel: [['api', 'auction', 'if higher']],
         short: 'If higher',
@@ -206,7 +206,7 @@ export const onlineAuction: Design = {
         narration:
           'An accepted bid also writes an outbox row in the same transaction. A worker publishes it as an event: the new price, the new leader and the previous leader, who was outbid.',
         tradeoff:
-          'Publishing directly after commit can lose the event if the process dies in between. The outbox adds a table and a worker, and guarantees every accepted bid is announced.',
+          'Publishing directly after commit can lose the event if the process dies in between. The outbox adds a table and a worker, and every accepted bid is announced at least once; consumers drop repeats by bid id.',
         nodes: ['auction', 'events'],
         travel: [['auction', 'events']],
         short: 'Outbox',
@@ -237,7 +237,7 @@ export const onlineAuction: Design = {
         narration:
           'A live update layer joins. Real-time servers subscribe to the auctions their viewers watch and push each new price over server-sent events. The outbid bidder also gets a notification.',
         tradeoff:
-          'Polling every second is simple but costly with many watchers and still feels slow at the end. Pushing over long-lived connections is cheaper per update and instant, at the cost of running a connection layer.',
+          'Polling every second is simple but costly with many watchers and still feels slow at the end. Pushing over long-lived connections is cheaper per update and instant, at the cost of running a connection layer. A push can be missed, so a watcher that reconnects reads the current price from the bid API first.',
         nodes: ['events', 'live', 'watchers'],
         travel: [
           ['events', 'live'],
@@ -301,11 +301,11 @@ export const onlineAuction: Design = {
         {
           name: 'Lock the auction row',
           pros: 'Correct and easy to reason about.',
-          cons: 'Bids on a hot auction wait in line and lock time grows with load.',
+          cons: 'The lock is held across round trips to the application, so bids on a hot auction wait in line and lock time grows with load.',
         },
         {
           name: 'Conditional update on the highest bid',
-          pros: 'Atomic, no explicit locks; the database settles races.',
+          pros: 'Atomic in one statement. It takes the same row lock, but only briefly and inside the database, which settles races.',
           cons: 'Losing bids must be reported and maybe retried by the client.',
         },
         {
