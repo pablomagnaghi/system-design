@@ -4,7 +4,7 @@ export const notificationSystem: Design = {
   slug: 'notification-system',
   title: 'Notification system',
   summary:
-    'Send push, email and SMS on behalf of every product team: urgent messages in seconds, campaigns at their own pace, user preferences respected and no visible duplicates.',
+    'Send push, email and SMS on behalf of every product team: urgent messages in seconds, campaigns at their own pace, user preferences respected and visible duplicates kept rare.',
   difficulty: 'Medium',
   minutes: 8,
   requirements: {
@@ -15,9 +15,9 @@ export const notificationSystem: Design = {
     ],
     nonFunctional: [
       'Urgent messages (sign-in codes, security alerts) arrive within seconds, even during a large campaign.',
-      'At-least-once delivery with no duplicates the user can see.',
+      'At-least-once delivery, with duplicates the user can see made rare, and eliminated where the provider accepts an idempotency key.',
       'A failing provider affects only its own channel.',
-      'Handle bursts of hundreds of thousands of notifications a minute.',
+      'Handle a few thousand notifications a second in steady state and campaign bursts of millions a minute.',
     ],
     outOfScope: ['Designing the message content and templates editor.', 'In-app inbox UI.'],
   },
@@ -160,7 +160,7 @@ export const notificationSystem: Design = {
         narration:
           'A service posts a notification. The API validates it, stores it and answers 202 Accepted with an id, before anything is sent.',
         tradeoff:
-          'Answering before sending keeps callers fast and independent of provider latency. The cost is that the caller cannot know the outcome in the same call, so status is a separate endpoint or a callback.',
+          'Answering before sending keeps callers fast and independent of provider latency. The cost is that the caller cannot know the outcome in the same call, so status is a separate endpoint or a callback. Storing and queueing are two steps, so a relay queues any stored notification that is still not queued after a short deadline; a crash after the 202 delays a message instead of losing it.',
         nodes: ['service', 'api'],
         travel: [['service', 'api']],
         short: 'Accept 202',
@@ -172,7 +172,7 @@ export const notificationSystem: Design = {
         narration:
           'The caller sends an idempotency key. A unique constraint on it turns a retried request into a no-op that returns the original id.',
         tradeoff:
-          'Keeping keys for a day costs some storage, and it means a caller that times out and retries never makes the user receive the same message twice.',
+          'Keeping keys for a day costs some storage, and it means a caller that times out and retries within that day does not create a second notification.',
         nodes: ['api'],
         travel: [],
         short: 'Dedupe',
@@ -253,7 +253,7 @@ export const notificationSystem: Design = {
         narration:
           'Workers call the provider. Temporary failures are retried with exponential backoff and jitter; a provider that keeps failing trips a circuit breaker, and urgent SMS can fail over to a second provider.',
         tradeoff:
-          'Retries raise the delivery rate but risk duplicates when a provider accepted the message and the response was lost. Checking the delivery log before each send, and passing an idempotency key when the provider supports one, keeps retries safe.',
+          'Retries raise the delivery rate but risk duplicates when a provider accepted the message and the response was lost. Checking the delivery log before each send makes duplicates rare, and passing an idempotency key removes them where the provider supports one. A provider without keys, or a failover to a second provider, can still deliver a message twice.',
         nodes: ['workers', 'providers'],
         travel: [['workers', 'providers']],
         short: 'Retry + breaker',
@@ -342,9 +342,9 @@ export const notificationSystem: Design = {
         },
       ],
       choice:
-        'A fan-out job that writes batches into the bulk queue, so a campaign can be throttled or stopped halfway.',
+        'A fan-out job that writes batches into the bulk queue, so a campaign can be throttled or stopped halfway. Each message is keyed by campaign and user, so a batch that is retried or resumed does not queue the same message again.',
     },
   ],
   wrapUp:
-    'One API that accepts fast and deduplicates, preferences first, a queue per priority, workers per channel with safe retries, and every attempt on record.',
+    'One API that accepts fast and deduplicates, preferences first, a queue per priority, workers per channel with retries deduplicated by the delivery log and provider keys, and every attempt on record.',
 };
