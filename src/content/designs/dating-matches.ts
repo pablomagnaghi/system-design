@@ -4,7 +4,7 @@ export const datingMatches: Design = {
   slug: 'dating-matches',
   title: 'Dating app matching',
   summary:
-    'Show each user a stack of nearby profiles that fit both people’s preferences, precompute those stacks so swiping never waits, never show a profile twice with a Bloom filter per user, record billions of swipes a day, and detect a mutual like atomically so both people get the match exactly once.',
+    'Show each user a stack of nearby profiles that fit both people’s preferences, precompute those stacks so swiping never waits, never show a profile twice with a Bloom filter per user, record billions of swipes a day, and detect a mutual like atomically so the match is created once and both people hear about it.',
   difficulty: 'Medium',
   minutes: 9,
   requirements: {
@@ -15,9 +15,9 @@ export const datingMatches: Design = {
       'When two people like each other, both learn about the match right away.',
     ],
     nonFunctional: [
-      'A mutual like always becomes a match, exactly once, even when both swipe at the same instant.',
+      'A mutual like always becomes a match, created only once, even when both swipe at the same instant.',
       'Swipes feel instant and the next profile is always ready.',
-      'Around 20 million daily users at about 100 swipes each: billions of swipes a day, peaks near 100,000 per second.',
+      'Around 20 million daily users at about 100 swipes each: billions of swipes a day, peaks near 50,000 per second.',
       'A profile someone already swiped on is not shown to them again.',
     ],
     outOfScope: [
@@ -296,9 +296,9 @@ export const datingMatches: Design = {
       {
         title: 'Record a like on the pair key',
         narration:
-          'A right swipe runs one atomic script on an in-memory store, under a key made of the two user ids in sorted order. The script records "this user likes the other" and, in the same step, reads whether the other like is already there.',
+          'A right swipe runs one atomic script on an in-memory store, under a key made of the two user ids in sorted order. The script records "this user likes the other" and, in the same step, reads whether the other like is already there. The store acknowledges the script only after a replica has the write, so a failover does not forget a like.',
         tradeoff:
-          'Writing a swipe and then reading the opposite one from another shard lets two people who swipe at the same instant both miss the match. Putting both directions on one key makes the check and the write a single atomic operation; the cost is a store that must be replicated, since it decides matches.',
+          'Writing a swipe and then reading the opposite one from another shard lets two people who swipe at the same instant both miss the match. Putting both directions on one key makes the check and the write a single atomic operation; the cost is a store that must replicate each like synchronously, since it decides matches, which adds about a millisecond to the swipe.',
         nodes: ['user', 'api', 'pairs'],
         travel: [
           ['user', 'api'],
@@ -339,7 +339,7 @@ export const datingMatches: Design = {
         narration:
           'When the script finds both likes, it writes a match under the same pair key with a create-if-absent insert, and the swiper’s response says "it is a match" so the screen changes at once.',
         tradeoff:
-          'Creating the match from two separate events could create it twice or not at all. A create-if-absent insert on the pair key makes every retry harmless and guarantees one match per pair; the cost is a unique key that every write must check, which is a single-row operation.',
+          'Creating the match from two separate events could create it twice or not at all. A create-if-absent insert on the pair key makes every retry harmless and guarantees one match per pair; the cost is a unique key that every write must check, which is a single-row operation. The matches database is a separate system, so a crash between the script and the insert would lose the match. A reconciler follows the swipe log a few seconds behind, applies each like to its pair key again and repeats the insert when both likes are there, so that crash only delays the match.',
         nodes: ['pairs', 'matches', 'api', 'user'],
         travel: [['pairs', 'matches', 'mutual']],
         short: 'Match',
@@ -375,7 +375,7 @@ export const datingMatches: Design = {
   },
   deepDives: [
     {
-      question: 'How do we detect a mutual like exactly once?',
+      question: 'How do we detect a mutual like and create the match only once?',
       options: [
         {
           name: 'Write the swipe, then read the opposite swipe',
@@ -385,16 +385,16 @@ export const datingMatches: Design = {
         {
           name: 'A transaction across both swipe rows',
           pros: 'Correct in a relational database.',
-          cons: 'Cross-shard transactions and locks at a hundred thousand swipes a second are slow and fragile.',
+          cons: 'Cross-shard transactions and locks at tens of thousands of swipes a second are slow and fragile.',
         },
         {
           name: 'One atomic operation on a pair key',
           pros: 'Both directions live on one key, so recording and checking are one step with no race.',
-          cons: 'The key store decides matches and must be replicated and durable enough to trust.',
+          cons: 'The key store decides matches, so it must replicate a like before acknowledging it, with a reconciler over the swipe log as a backstop.',
         },
       ],
       choice:
-        'An atomic script on a key made of the two sorted user ids, followed by a create-if-absent match insert. A single-partition conditional write in a wide-column store keyed by the pair is an equally valid version.',
+        'An atomic script on a key made of the two sorted user ids, followed by a create-if-absent match insert that a reconciler over the swipe log repeats if a crash skipped it. A single-partition conditional write in a wide-column store keyed by the pair is an equally valid version.',
     },
     {
       question: 'How do we never show a profile the user already swiped on?',
