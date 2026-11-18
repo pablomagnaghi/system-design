@@ -14,9 +14,9 @@ export const metricsMonitoring: Design = {
       'Define alert rules on queries and notify on-call people through several channels.',
     ],
     nonFunctional: [
-      'Ingest tens of millions of data points per second without dropping data during spikes.',
+      'Ingest tens of millions of data points per second without dropping accepted data during spikes.',
       'Dashboard queries over recent data return in under a second.',
-      'Alerts fire within a minute of the condition becoming true.',
+      'Alerts fire within about a minute after the condition has held for the duration set in the rule.',
       'Keep raw data for weeks and downsampled data for a year or more, at low cost.',
     ],
     outOfScope: ['Log search and distributed tracing.', 'Automatic anomaly detection models.'],
@@ -152,13 +152,13 @@ export const metricsMonitoring: Design = {
       {
         title: 'Agents batch and push',
         narration:
-          'An agent on each host collects metrics from the machine and its services, keeps counters locally, and every ten seconds pushes a compressed batch to the ingest gateway.',
+          'An agent on each host collects metrics from the machine and its services, keeps counters locally, and every ten seconds pushes a compressed batch to the ingest gateway. A few hundred thousand hosts make about 30K batches per second, each carrying around a thousand points.',
         tradeoff:
           'Pushing works through firewalls and for short-lived jobs, and batching cuts requests by orders of magnitude. Pulling (the server scraping each host) makes it easy to tell a dead host from a quiet one, so push systems need a separate heartbeat to catch silent hosts.',
         nodes: ['agents', 'gateway'],
         travel: [['agents', 'gateway']],
         short: 'Push',
-        metrics: { requestsPerSecond: '10K', p95Latency: '20 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '20 ms', errorRate: '0.1%' },
         load: { agents: 10, gateway: 30 },
       },
       {
@@ -170,7 +170,7 @@ export const metricsMonitoring: Design = {
         nodes: ['gateway'],
         travel: [],
         short: 'Limits',
-        metrics: { requestsPerSecond: '10K', p95Latency: '20 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '20 ms', errorRate: '0.1%' },
         load: { gateway: 40 },
       },
       {
@@ -178,24 +178,24 @@ export const metricsMonitoring: Design = {
         narration:
           'Accepted batches are written to a durable, partitioned queue. Storage nodes consume from it at their own pace.',
         tradeoff:
-          'The queue absorbs spikes and lets storage be restarted or upgraded without losing data, at the cost of a few seconds of extra delay and one more system to run. Writing straight to storage is simpler but drops data whenever storage is slow.',
+          'The queue absorbs spikes and lets storage be restarted or upgraded without losing data, as long as a restarted node can replay what it had only in memory (the next stage), at the cost of a few seconds of extra delay and one more system to run. Writing straight to storage is simpler, but when storage is slow or down the agents must hold and retry, and data is dropped once their small buffers fill.',
         nodes: ['gateway', 'queue'],
         travel: [['gateway', 'queue']],
         short: 'Queue',
-        metrics: { requestsPerSecond: '10K', p95Latency: '30 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '30 ms', errorRate: '0.1%' },
         load: { gateway: 35, queue: 30 },
         traffic: [{ edge: ['gateway', 'queue'], kind: 'heavy' }],
       },
       {
         title: 'Store as compressed time series',
         narration:
-          'Storage nodes, sharded by a hash of the series, append points to in-memory blocks and flush them to disk every couple of hours. Timestamps are delta-encoded and values are compressed against the previous one.',
+          'Storage nodes, sharded by a hash of the series, append points to in-memory blocks and flush them to disk every couple of hours. A node commits its queue offset only after the block holding those points is flushed, and the queue keeps data longer than the flush interval, so a restart replays the unflushed points; a replayed point has the same series and timestamp and overwrites itself. Timestamps are delta-encoded and values are compressed against the previous one.',
         tradeoff:
           'A time-series layout compresses a point to a couple of bytes and makes range reads sequential, which a general database cannot match. It is bad at updating old points, which metrics almost never need.',
         nodes: ['queue', 'tsdb'],
         travel: [['queue', 'tsdb']],
         short: 'Time series',
-        metrics: { requestsPerSecond: '10K', p95Latency: '30 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '30 ms', errorRate: '0.1%' },
         load: { queue: 30, tsdb: 50 },
       },
       {
@@ -211,7 +211,7 @@ export const metricsMonitoring: Design = {
         ],
         short: 'Raw scan',
         metrics: {
-          requestsPerSecond: '10K',
+          requestsPerSecond: '30K',
           p95Latency: '12 s',
           errorRate: '3%',
           alerts: ['p95Latency', 'errorRate'],
@@ -232,7 +232,7 @@ export const metricsMonitoring: Design = {
         travel: [['tsdb', 'cold']],
         short: 'Downsample',
         metrics: {
-          requestsPerSecond: '10K',
+          requestsPerSecond: '30K',
           p95Latency: '1.5 s',
           errorRate: '0.5%',
           alerts: ['p95Latency'],
@@ -253,22 +253,22 @@ export const metricsMonitoring: Design = {
           ['query', 'dashboards'],
         ],
         short: 'Query',
-        metrics: { requestsPerSecond: '10K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { tsdb: 40, cold: 30, query: 45 },
       },
       {
         title: 'Evaluate alert rules on a schedule',
         narration:
-          'The evaluator loads rules and runs each one every minute through the query service. A rule that is true for its full duration, for example five minutes, moves from pending to firing.',
+          'The evaluator loads rules and runs each one every minute through the query service. A rule that is true for its full duration, for example five minutes, moves from pending to firing, so the page goes out about a minute after the hold ends, not a minute after the condition first appears.',
         tradeoff:
-          'Requiring a condition to hold for a while removes most noise from brief spikes, at the cost of alerting a few minutes later. Rules are sharded across evaluators so one slow rule never delays the others.',
+          'Requiring a condition to hold for a while removes most noise from brief spikes, at the cost of alerting a few minutes later. Rules are sharded across evaluators so one slow rule delays only the rules on its own shard.',
         nodes: ['rules', 'evaluator', 'query'],
         travel: [
           ['rules', 'evaluator'],
           ['query', 'evaluator'],
         ],
         short: 'Evaluate',
-        metrics: { requestsPerSecond: '10K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { rules: 10, evaluator: 35, query: 50 },
       },
       {
@@ -280,7 +280,7 @@ export const metricsMonitoring: Design = {
         nodes: ['evaluator', 'notifier'],
         travel: [['evaluator', 'notifier']],
         short: 'Route',
-        metrics: { requestsPerSecond: '10K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { evaluator: 35, notifier: 20 },
       },
       {
@@ -292,7 +292,7 @@ export const metricsMonitoring: Design = {
         nodes: ['evaluator', 'notifier'],
         travel: [],
         short: 'Heartbeat',
-        metrics: { requestsPerSecond: '10K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { requestsPerSecond: '30K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { evaluator: 35, notifier: 20 },
         traffic: [{ edge: ['evaluator', 'notifier'], kind: 'health' }],
       },
@@ -362,5 +362,5 @@ export const metricsMonitoring: Design = {
     },
   ],
   wrapUp:
-    'Agents push batches through a gateway that enforces cardinality limits, a queue buffers writes into a sharded, compressed time-series store with downsampled cold storage, and a prioritized evaluator feeds a notifier that groups and routes pages.',
+    'Agents push batches through a gateway that enforces cardinality limits, a queue buffers writes and replays unflushed points into a sharded, compressed time-series store with downsampled cold storage, and a prioritized evaluator feeds a notifier that groups and routes pages.',
 };
