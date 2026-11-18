@@ -16,8 +16,8 @@ export const webCrawler: Design = {
     ],
     nonFunctional: [
       'Crawl on the order of ten billion pages in a few weeks: thousands of fetches per second.',
-      'Polite: never more than one request at a time to a host, with a delay between requests.',
-      'Fault tolerant: a crashed worker loses no progress beyond the page it was fetching.',
+      'Polite: one request at a time to a host, with a delay after each request finishes.',
+      'Fault tolerant: a crashed worker loses no progress beyond the pages it had in flight, which are fetched again.',
       'Avoid wasting fetches on duplicate URLs and duplicate content.',
     ],
     outOfScope: [
@@ -36,7 +36,8 @@ export const webCrawler: Design = {
     },
     {
       name: 'Page',
-      description: 'Raw content stored in blob storage, keyed by URL and fetch time.',
+      description:
+        'Raw content stored in blob storage, keyed by URL and crawl cycle, with the fetch time as metadata.',
     },
   ],
   api: [
@@ -154,9 +155,9 @@ export const webCrawler: Design = {
       {
         title: 'Pick a host that is ready',
         narration:
-          'The frontier keeps hosts ordered by their next allowed fetch time. A fetcher asks for work and gets a URL from a host whose time has come, then that host is pushed back by its crawl delay.',
+          'The frontier keeps hosts ordered by their next allowed fetch time. A fetcher asks for work and gets a URL from a host whose time has come. That host is marked in flight and handed to nobody else; when the fetch completes or its lease expires, the next allowed time is set to that moment plus the crawl delay.',
         tradeoff:
-          'Scheduling by host readiness enforces politeness without any locks between fetchers. Big sites with many pages are crawled slowly by design, so priority between hosts must be tuned to avoid starving important ones.',
+          'Scheduling by host readiness enforces politeness without any locks between fetchers. Counting the delay from the end of a fetch, not from the hand-out, keeps a slow response from overlapping the next request. Big sites with many pages are crawled slowly by design, so priority between hosts must be tuned to avoid starving important ones.',
         nodes: ['hosts', 'frontier'],
         travel: [['hosts', 'frontier']],
         short: 'Ready host',
@@ -211,7 +212,7 @@ export const webCrawler: Design = {
       {
         title: 'Store the raw page first',
         narration:
-          'The response body is written to blob storage, keyed by URL and fetch time, before any parsing happens.',
+          'The response body is written to blob storage, keyed by URL and crawl cycle, before any parsing happens. A repeated fetch of the same URL in the same cycle overwrites the same object.',
         tradeoff:
           'Storing first means a parser bug never costs a refetch: the page can be reprocessed from storage. It uses more space than keeping only extracted text, but storage is cheap compared to fetching the web again.',
         nodes: ['fetchers', 'blobs'],
@@ -238,7 +239,7 @@ export const webCrawler: Design = {
         narration:
           'Each link is checked against a seen-URL filter. Each page also gets a content hash, so mirrors and copies of the same content are recognized even under different URLs.',
         tradeoff:
-          'A Bloom filter answers "seen before?" for billions of URLs in a few gigabytes of memory. It has rare false positives, which means a few new URLs are skipped; for a crawl of this size that is an acceptable loss.',
+          'A Bloom filter answers "seen before?" for ten billion URLs in about 12 GB of memory at a 1% false positive rate, split across nodes. A false positive means a new URL is skipped, so about 1% of new URLs are never crawled; for a crawl of this size that is an acceptable loss, and more bits per URL lower it.',
         nodes: ['parsers', 'dedup'],
         travel: [['parsers', 'dedup']],
         short: 'Seen filter',
@@ -248,9 +249,9 @@ export const webCrawler: Design = {
       {
         title: 'Record state and enqueue new links',
         narration:
-          'New URLs are written to the URL store with their status and next due time, and pushed into the frontier under their host. The loop continues from there.',
+          'New URLs are written to the URL store with their status and next due time, and then pushed into the frontier under their host. A periodic scan of the store for due URLs that are not queued covers a crash between the two writes. The loop continues from there.',
         tradeoff:
-          'Keeping URL state in a durable store means a crashed worker only loses its current page, and recrawl times can be scheduled per URL. The frontier itself can be rebuilt from the store, at the cost of a slow restart.',
+          'Keeping URL state in a durable store means a crashed worker only loses the pages it had in flight, and recrawl times can be scheduled per URL. The frontier itself can be rebuilt from the store, at the cost of a slow restart.',
         nodes: ['dedup', 'urls', 'frontier'],
         travel: [
           ['dedup', 'urls'],
@@ -334,7 +335,7 @@ export const webCrawler: Design = {
         },
       ],
       choice:
-        'Lease URLs with a timeout and make storing a page idempotent by URL and fetch time. A rare duplicate fetch costs one request; a lost URL would silently shrink the crawl.',
+        'Lease URLs with a timeout longer than the fetch timeout, so a fetcher has given up on a request before another one can be handed the same host, and make storing a page idempotent by URL and crawl cycle. A rare duplicate fetch costs one request; a lost URL would silently shrink the crawl.',
     },
   ],
   wrapUp:
