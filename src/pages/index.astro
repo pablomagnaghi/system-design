@@ -13,9 +13,10 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         step by step.
       </h1>
       <p class="lead">
-        Classic system design problems worked through in the order of an interview. Each design has
-        an animated diagram: press play to follow one request through the system, and read what
-        happens at every step and the trade-off behind it.
+        An interactive library of how production systems are designed, scaled, operated and evolved.
+        Each design is an animated scaling story: press play, watch a bottleneck appear and the
+        design grow to fix it, and read the trade-off at every step. A growing set also states its
+        guarantees, failure scenarios, capacity math and how it should evolve.
       </p>
       <div class="actions">
         <a class="button primary" href="#designs">
@@ -39,7 +40,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
             <h3>{design.title}</h3>
             <p class="muted">{design.summary}</p>
             <span class="cta">
-              {design.highLevel.stages.length} steps · {design.deepDives.length} deep dives →
+              {design.highLevel.stages.length} steps · {design.deepDives.length} deep dives
+              {design.guarantees ? ' · guarantees and failures' : ''} →
             </span>
           </a>
         ))}
