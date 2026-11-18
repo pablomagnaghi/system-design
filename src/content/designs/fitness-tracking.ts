@@ -4,7 +4,7 @@ export const fitnessTracking: Design = {
   slug: 'fitness-tracking',
   title: 'Fitness activity tracking',
   summary:
-    'Record runs and rides on a phone with no signal, upload each one exactly once, turn raw GPS points into stats and a map, match the track against millions of segments with a spatial index, keep segment leaderboards, and show friends’ activities in a feed.',
+    'Record runs and rides on a phone with no signal, upload each one so that a retry never creates a duplicate, turn raw GPS points into stats and a map, match the track against millions of segments with a spatial index, keep segment leaderboards, and show friends’ activities in a feed.',
   difficulty: 'Medium',
   minutes: 10,
   requirements: {
@@ -16,7 +16,7 @@ export const fitnessTracking: Design = {
       'See friends’ recent activities in a feed.',
     ],
     nonFunctional: [
-      'Recording never depends on the network, and a saved activity is never lost or duplicated.',
+      'Recording never depends on the network. A saved activity stays on the phone until the server confirms the upload, so it is not lost, and a retry never duplicates it.',
       'Around 100 million users and 10 million activities a day, with weekend mornings at several times the average.',
       'An uploaded activity shows its stats within seconds; segments and the feed can follow within a minute.',
       'Activities are written once and read many times; a one-hour track is a few thousand points.',
@@ -241,7 +241,7 @@ export const fitnessTracking: Design = {
         short: 'Weekend peak',
         metrics: {
           users: '5M',
-          requestsPerSecond: '5K',
+          requestsPerSecond: '1K',
           p95Latency: '9 s',
           errorRate: '7%',
           alerts: ['p95Latency', 'errorRate'],
@@ -252,16 +252,16 @@ export const fitnessTracking: Design = {
       {
         title: 'Accept now, process later',
         narration:
-          'A work queue joins. The API now answers 202 as soon as the track is stored and a job is on the work queue. Weekend morning peaks fill the queue, and processors drain it at a steady pace.',
+          'A work queue joins. The API now answers 202 as soon as the track is stored and a job is on the work queue. Weekend morning peaks fill the queue, and processors drain it at a steady pace. Creating the activity and enqueueing the job are two writes, so a retried upload that finds the activity still unprocessed enqueues the job again, and a sweeper does the same for any activity left unprocessed past a deadline.',
         tradeoff:
-          'Processing inside the request would make the upload slow and sizing the fleet for the peak hour would waste money all week. A queue absorbs the peak and lets processors scale on its depth; the cost is a few seconds before stats appear, which the app covers with its own local numbers.',
+          'Processing inside the request would make the upload slow and sizing the fleet for the peak hour would waste money all week. A queue absorbs the peak and lets processors scale on its depth; the cost is a few seconds before stats appear, which the app covers with its own local numbers. A job can now arrive twice, which is harmless because processing overwrites the same activity by id.',
         nodes: ['api', 'queue', 'processor'],
         travel: [
           ['api', 'queue', 'job'],
           ['queue', 'processor'],
         ],
         short: 'Work queue',
-        metrics: { users: '5M', requestsPerSecond: '5K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { users: '5M', requestsPerSecond: '1K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { api: 35, tracks: 40, queue: 70, processor: 85 },
       },
       {
@@ -276,14 +276,14 @@ export const fitnessTracking: Design = {
           ['processor', 'activities', 'summary'],
         ],
         short: 'Clean + stats',
-        metrics: { users: '5M', requestsPerSecond: '5K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { users: '5M', requestsPerSecond: '1K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { tracks: 40, processor: 80, activities: 35, queue: 55 },
         traffic: [{ edge: ['tracks', 'processor'], kind: 'heavy' }],
       },
       {
         title: 'Find candidate segments by cell',
         narration:
-          'The processor publishes an activity-created event. The segment matcher converts the track into the set of map cells it passes through and looks each cell up in the segment index, which maps a cell to the segments that start in it.',
+          'The processor publishes an activity-created event and acknowledges its job only after that, so a crash in between reruns the job and publishes again. The event arrives at least once, and the matcher and the feed fan-out treat a repeat as a no-op by activity id. The segment matcher converts the track into the set of map cells it passes through and looks each cell up in the segment index, which maps a cell to the segments that start in it.',
         tradeoff:
           'Comparing a track with millions of segments is impossible, and a general spatial query per point is too slow. A cell index turns the search into a few dozen key lookups that return a short candidate list; the cost is keeping the index in sync as segments are created, which is rare.',
         nodes: ['processor', 'matcher', 'cells'],
@@ -292,7 +292,7 @@ export const fitnessTracking: Design = {
           ['matcher', 'cells', 'cells crossed'],
         ],
         short: 'Find segments',
-        metrics: { users: '5M', requestsPerSecond: '5K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { users: '5M', requestsPerSecond: '1K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { processor: 70, matcher: 50, cells: 30 },
       },
       {
@@ -304,7 +304,7 @@ export const fitnessTracking: Design = {
         nodes: ['matcher', 'efforts'],
         travel: [['matcher', 'efforts', 'effort']],
         short: 'Match',
-        metrics: { users: '5M', requestsPerSecond: '5K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { users: '5M', requestsPerSecond: '1K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { matcher: 60, efforts: 30 },
       },
       {
@@ -316,7 +316,7 @@ export const fitnessTracking: Design = {
         nodes: ['matcher', 'boards'],
         travel: [['matcher', 'boards', 'best time']],
         short: 'Leaderboard',
-        metrics: { users: '5M', requestsPerSecond: '5K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { users: '5M', requestsPerSecond: '1K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { matcher: 55, boards: 35 },
       },
       {
@@ -331,7 +331,7 @@ export const fitnessTracking: Design = {
           ['fanout', 'feeds'],
         ],
         short: 'Fan-out',
-        metrics: { users: '5M', requestsPerSecond: '5K', p95Latency: '300 ms', errorRate: '0.1%' },
+        metrics: { users: '5M', requestsPerSecond: '1K', p95Latency: '300 ms', errorRate: '0.1%' },
         load: { processor: 60, fanout: 55, feeds: 40 },
       },
       {
