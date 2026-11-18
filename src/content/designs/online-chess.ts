@@ -18,7 +18,7 @@ export const onlineChess: Design = {
       'About a million games at once at peak; each game is a tiny, independent state.',
       'A move reaches the opponent in about a hundred milliseconds.',
       'Clocks are fair and decided by the server, never by a client.',
-      'Within a game, moves apply once and in order, and an acknowledged move is never lost.',
+      'Within a game, moves apply once and in order by move number, and a move is acknowledged only after a replicated append to the move log, so an acknowledged move survives a server failure.',
     ],
     outOfScope: ['Cheat detection.', 'Tournaments, chat and puzzles.'],
   },
@@ -150,7 +150,7 @@ export const onlineChess: Design = {
           ['gateway', 'matcher', 'seek'],
         ],
         short: 'Join pool',
-        metrics: { users: '200K', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
+        metrics: { users: '2M', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
         load: { gateway: 20, matcher: 15, pool: 10 },
       },
       {
@@ -162,25 +162,25 @@ export const onlineChess: Design = {
         nodes: ['matcher', 'pool'],
         travel: [['matcher', 'pool', 'pair']],
         short: 'Widen window',
-        metrics: { users: '200K', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
+        metrics: { users: '2M', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
         load: { matcher: 25, pool: 15 },
       },
       {
         title: 'Pair atomically',
         narration:
-          'Pairing removes both seeks in one atomic step on the pool: if either is already gone, nothing happens and the matchmaker tries again. Each pool has a single matchmaker owner, so two workers never race on it.',
+          'Pairing removes both seeks in one atomic step on the pool: if either is already gone, nothing happens and the matchmaker tries again. Each pool normally has a single matchmaker owner, but correctness rests on the atomic removal: if two workers overlap during a handover, only one of them removes the pair.',
         tradeoff:
-          'Reading two seeks and removing them in separate steps can put one player in two games. An atomic step or a single owner per pool prevents that, and the cost is that one pool is served by one worker, which is plenty for a sorted set.',
+          'Reading two seeks and removing them in separate steps can put one player in two games. The atomic step prevents that even when two workers briefly overlap; a single owner per pool only avoids wasted attempts, and the cost is that one pool is served by one worker, which is plenty for a sorted set.',
         nodes: ['matcher', 'pool'],
         travel: [['matcher', 'pool', 'pair']],
         short: 'Pair',
-        metrics: { users: '200K', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
+        metrics: { users: '2M', requestsPerSecond: '2K', p95Latency: '30 ms', errorRate: '0%' },
         load: { matcher: 30, pool: 20 },
       },
       {
         title: 'Place the game on its shard',
         narration:
-          'The matchmaker creates the game with a new ID, colors and clocks. The ID maps to one game server through the directory, and both players are told the game ID and connect through the gateway, which routes them to that server.',
+          'The matchmaker creates the game with a new ID, colors and clocks. The ID maps to one game server through the directory, and both players are told the game ID and connect through the gateway, which routes them to that server. If the matchmaker dies between removing the seeks and creating the game, the clients time out after a few seconds and seek again.',
         tradeoff:
           'Spreading a game across servers would need coordination on every move. Pinning each game to one owner makes the owner the single authority, and the cost is a directory to keep and a failover story when an owner dies.',
         nodes: ['matcher', 'server', 'gateway', 'directory'],
@@ -190,7 +190,7 @@ export const onlineChess: Design = {
         ],
         short: 'Place game',
         metrics: {
-          users: '200K',
+          users: '2M',
           requestsPerSecond: '2K',
           p95Latency: '40 ms',
           errorRate: '0%',
@@ -211,8 +211,8 @@ export const onlineChess: Design = {
         ],
         short: 'Validate move',
         metrics: {
-          users: '200K',
-          requestsPerSecond: '30K',
+          users: '2M',
+          requestsPerSecond: '200K',
           p95Latency: '40 ms',
           errorRate: '0.1%',
           healthy: '20 / 20',
@@ -229,8 +229,8 @@ export const onlineChess: Design = {
         travel: [],
         short: 'Server clock',
         metrics: {
-          users: '200K',
-          requestsPerSecond: '30K',
+          users: '2M',
+          requestsPerSecond: '200K',
           p95Latency: '40 ms',
           errorRate: '0.1%',
           healthy: '20 / 20',
@@ -242,7 +242,7 @@ export const onlineChess: Design = {
         narration:
           'The move is appended to the move log for the game, and only then acknowledged to the mover and pushed to the opponent with both clocks. Spectators get it through a separate fan-out so the game server stays small.',
         tradeoff:
-          'Pushing before saving shaves a few milliseconds, and a crash right after could show a move to the opponent that the system then forgets. Saving first costs one fast append per move and means a delivered move always survives.',
+          'Pushing before saving shaves a few milliseconds, and a crash right after could show a move to the opponent that the system then forgets. Saving first costs one fast append per move and means a delivered move survives a game server crash, as long as the log replicates the append before it confirms.',
         nodes: ['server', 'movelog', 'gateway', 'players'],
         travel: [
           ['server', 'movelog', 'append'],
@@ -250,8 +250,8 @@ export const onlineChess: Design = {
         ],
         short: 'Save, deliver',
         metrics: {
-          users: '200K',
-          requestsPerSecond: '30K',
+          users: '2M',
+          requestsPerSecond: '200K',
           p95Latency: '45 ms',
           errorRate: '0.1%',
           healthy: '20 / 20',
@@ -272,8 +272,8 @@ export const onlineChess: Design = {
         ],
         short: 'Reconnect',
         metrics: {
-          users: '200K',
-          requestsPerSecond: '30K',
+          users: '2M',
+          requestsPerSecond: '200K',
           p95Latency: '45 ms',
           errorRate: '0.1%',
           healthy: '20 / 20',
@@ -283,7 +283,7 @@ export const onlineChess: Design = {
       {
         title: 'Recover from a failed server',
         narration:
-          'If a game server dies, the directory reassigns its games to other servers. Each new owner replays the move log to rebuild board and clocks, players reconnect, and play continues from the last saved move.',
+          'If a game server dies, the directory reassigns its games to other servers under a higher lease epoch. The move log accepts an append only with the current epoch and the next move number, so an old owner that was paused and not dead cannot keep adding moves. Each new owner replays the move log to rebuild board and clocks, players reconnect, and play continues from the last saved move.',
         tradeoff:
           'A hot standby per game would fail over faster and double the memory and traffic for a rare event. Replaying a log of a few dozen moves takes milliseconds, so the cost is only the seconds players spend reconnecting, with clocks restored from saved times.',
         nodes: ['gateway', 'directory', 'server', 'movelog'],
@@ -293,8 +293,8 @@ export const onlineChess: Design = {
         ],
         short: 'Server dies',
         metrics: {
-          users: '200K',
-          requestsPerSecond: '30K',
+          users: '2M',
+          requestsPerSecond: '200K',
           p95Latency: '2.5 s',
           errorRate: '3%',
           healthy: '19 / 20',
@@ -309,7 +309,7 @@ export const onlineChess: Design = {
       {
         title: 'Rate the game after it ends',
         narration:
-          'On checkmate, resignation, timeout or draw, the server writes the result and emits a game-ended event. The rating service updates both players, keyed by game ID so a replayed event changes nothing, and the archive stores the full game.',
+          'On checkmate, resignation, timeout or draw, the server writes the result as the last entry of the game’s log. The game-ended event is published from that log at least once: a relay publishes again any finished game not yet marked as announced. The rating service updates both players, keyed by game ID so a replayed event changes nothing, and the archive stores the full game.',
         tradeoff:
           'Updating ratings inside the game server would put a second database on the move path. An event keeps games independent of ratings, and the cost is a second or so before the new rating shows up.',
         nodes: ['server', 'events', 'ratings', 'archive'],
@@ -320,8 +320,8 @@ export const onlineChess: Design = {
         ],
         short: 'Rate game',
         metrics: {
-          users: '200K',
-          requestsPerSecond: '30K',
+          users: '2M',
+          requestsPerSecond: '200K',
           p95Latency: '45 ms',
           errorRate: '0.1%',
           healthy: '20 / 20',
@@ -347,7 +347,7 @@ export const onlineChess: Design = {
         {
           name: 'Sorted pool with a widening window',
           pros: 'Closest available opponent, with waits bounded by how fast the window grows.',
-          cons: 'Pairing must be atomic or owned by one worker, and the widening needs tuning.',
+          cons: 'Pairing must be atomic, and the widening needs tuning.',
         },
       ],
       choice:
@@ -395,7 +395,7 @@ export const onlineChess: Design = {
         },
       ],
       choice:
-        'Shard by game ID, keep state in memory on the owner, append every move before acknowledging it, and rebuild from the log on failover. Each server holds tens of thousands of games, so a few dozen servers cover a million.',
+        'Shard by game ID, keep state in memory on the owner, append every move before acknowledging it, and rebuild from the log on failover, with a lease epoch checked on every append so only the current owner can write. Each server holds tens of thousands of games, so a few dozen servers cover a million.',
     },
   ],
   wrapUp:
