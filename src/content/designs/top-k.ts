@@ -17,7 +17,7 @@ export const topK: Design = {
       'Ingest hundreds of thousands of events per second at peak.',
       'Read the top K in tens of milliseconds, since the page is hit constantly.',
       'Rankings may lag reality by up to a minute.',
-      'Approximate counts are fine for the live view; exact daily counts are needed later.',
+      'Approximate counts are fine for the live view; daily counts that are exact over the acknowledged events, with repeats removed by event id, are needed later.',
     ],
     outOfScope: [
       'Personalized rankings per user.',
@@ -27,7 +27,8 @@ export const topK: Design = {
   entities: [
     {
       name: 'View event',
-      description: 'Item id, timestamp, optional category and region. Immutable, append-only.',
+      description:
+        'A unique event id set by the client, item id, timestamp, optional category and region. Immutable, append-only.',
     },
     {
       name: 'Window count',
@@ -42,7 +43,8 @@ export const topK: Design = {
     {
       method: 'POST',
       path: '/events',
-      description: 'Body: itemId, type, timestamp. Fire and forget; returns 202.',
+      description:
+        'Body: eventId, itemId, type, timestamp. Returns 202; a client that gets no answer retries with the same eventId.',
     },
     {
       method: 'GET',
@@ -173,7 +175,7 @@ export const topK: Design = {
       {
         title: 'Append to a partitioned log',
         narration:
-          'A log joins the write path. Events are appended to a durable log partitioned by item id, so every event for one item lands on the same partition in order.',
+          'A log joins the write path. Events are appended to a durable log partitioned by item id, so every event for one item lands on the same partition in order. Ingest answers 202 only after the log confirms the append, so an acknowledged event is not lost when an ingest node dies.',
         tradeoff:
           'Writing straight to a counter database would be simpler, but a hot item would hammer one row. The log absorbs spikes, can be replayed after a bug, and feeds both the live and the batch paths, at the cost of running one more system.',
         nodes: ['ingest', 'log'],
@@ -192,7 +194,7 @@ export const topK: Design = {
         narration:
           'Stream counters read their partitions and keep, in memory, a count per item per minute. Because partitioning is by item, no two counters ever count the same item.',
         tradeoff:
-          'Exact per-item counts in memory are easy to reason about and fine for millions of items. With hundreds of millions of distinct items, a count-min sketch plus a small heap uses far less memory but overcounts rare items slightly.',
+          'Exact per-item counts in memory are easy to reason about and fine for millions of items. With hundreds of millions of distinct items, a count-min sketch plus a small heap uses far less memory. Its error is additive: negligible next to a heavy hitter, but it can exceed the true count of a rare item.',
         nodes: ['log', 'counters'],
         travel: [['log', 'counters']],
         short: 'Count',
@@ -243,7 +245,7 @@ export const topK: Design = {
         narration:
           'The merger combines the partial lists from every partition, keeps the K largest, and writes the result as a snapshot keyed by window and filter.',
         tradeoff:
-          'A single merger per window is simple and the input is small. It is a single point of failure, so it runs as a standby pair; if both fail, readers still see the last snapshot, only older.',
+          'A single merger per window is simple and the input is small. It is a single point of failure, so it runs as a standby pair; if both fail, readers still see the last snapshot, only older. If both run at once, each writes a complete snapshot with its build time and the newer one wins, so no lock is needed.',
         nodes: ['merger', 'cache'],
         travel: [['merger', 'cache']],
         short: 'Merge',
@@ -275,7 +277,7 @@ export const topK: Design = {
       {
         title: 'Keep raw events for exact answers',
         narration:
-          'The log is also copied into a cheap columnar store. A nightly batch job computes exact daily and weekly counts and overwrites the approximate snapshots for those windows.',
+          'The log is also copied into a cheap columnar store. A nightly batch job drops repeated event ids, since retries and replays deliver some events more than once, then computes exact daily and weekly counts and overwrites the approximate snapshots for those windows.',
         tradeoff:
           'Running a fast approximate path and a slow exact path doubles some logic. It gives the best of both: a live ranking within a minute, and numbers that can be reported or paid on the next day.',
         nodes: ['log', 'lake', 'batch', 'cache'],
@@ -308,7 +310,7 @@ export const topK: Design = {
         {
           name: 'Count-min sketch plus a heap',
           pros: 'Fixed memory regardless of item count; good accuracy for heavy hitters.',
-          cons: 'Only overestimates; rare items can look more popular than they are.',
+          cons: 'Only overestimates, by an additive error that is large relative to a small count, so rare items can look more popular than they are.',
         },
         {
           name: 'Space-saving (heavy hitters) counters',
@@ -330,7 +332,7 @@ export const topK: Design = {
         {
           name: 'Pre-aggregate at ingest',
           pros: 'Ingest nodes batch counts for a second and send one increment per item.',
-          cons: 'Adds a small delay and a little state on ingest nodes.',
+          cons: 'Adds a small delay, and a node that dies loses up to a second of increments from the live count.',
         },
         {
           name: 'Split hot keys into sub-keys',
@@ -339,7 +341,7 @@ export const topK: Design = {
         },
       ],
       choice:
-        'Pre-aggregate at ingest. A viral item becomes one message per ingest node per second, which removes the hot spot without changing how counters or the merger work.',
+        'Pre-aggregate at ingest. A viral item becomes one message per ingest node per second, which removes the hot spot without changing how counters or the merger work. Only the live path is pre-aggregated: each raw event is still appended on its own, with its event id, to the stream that feeds the raw event store, spread by event id so a viral item is not a hot partition there. The live count can lose a second of increments in a crash, and the batch path corrects it.',
     },
     {
       question: 'How do we serve rankings for many categories and regions?',
