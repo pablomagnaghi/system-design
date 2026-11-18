@@ -15,10 +15,10 @@ export const fileSync: Design = {
       'Users can restore an earlier version of a file.',
     ],
     nonFunctional: [
-      'Durable: a file that was acknowledged is never lost.',
+      'Durable: a commit is acknowledged only after its chunks are in replicated blob storage and its metadata is durably written, so an acknowledged file is not lost.',
       'Changes reach other online devices within a few seconds.',
       'Large uploads survive flaky networks and resume where they stopped.',
-      'Scale to hundreds of millions of users and petabytes of data.',
+      'Scale to tens of millions of users and petabytes of data.',
     ],
     outOfScope: [
       'Editing documents in the browser in real time.',
@@ -195,7 +195,7 @@ export const fileSync: Design = {
       {
         title: 'Commit against a base version',
         narration:
-          'Once every chunk is stored, the client commits the new version. The metadata database accepts it only if the file is still at the base version the client started from.',
+          'Once every chunk is stored, the client commits the new version. The metadata database accepts it only if the file is still at the base version the client started from. The same transaction checks that every chunk in the list is still present and adds a reference to each; if cleanup removed one in the meantime, the commit is rejected and the client uploads that chunk again.',
         tradeoff:
           'A conditional write is optimistic concurrency: no locks are held while a large file uploads, and most commits never conflict. The price is that the rare loser has to handle a rejection instead of waiting its turn.',
         nodes: ['client', 'api', 'metadata'],
@@ -296,7 +296,7 @@ export const fileSync: Design = {
         narration:
           'Old versions are kept for a retention window so users can restore them. A background job then drops expired versions and deletes chunks no version references anymore.',
         tradeoff:
-          'Deleting chunks as soon as a version goes away is risky, because a new upload may be about to reference the same hash. A delayed, reference-counted sweep with a grace period is slower to reclaim space, and it never deletes a chunk that is still needed.',
+          'Deleting chunks as soon as a version goes away is risky, because a new upload may be about to reference the same hash. A delayed, reference-counted sweep with a grace period is slower to reclaim space. The grace period alone does not close the race: a client told to skip a chunk it already has could commit just after the sweep picks that chunk. So the sweep first marks the chunk as deleting with a conditional write that fails if a reference appeared, and only then removes the bytes, while the commit takes its references in its own transaction. A committed version never points at a deleted chunk.',
         nodes: ['metadata', 'gc'],
         travel: [['metadata', 'gc']],
         short: 'History + GC',
