@@ -302,7 +302,7 @@ export const distributedCache: Design = {
       {
         title: 'When a shard dies',
         narration:
-          'If a primary fails, its replica is promoted. If the whole shard is lost, its keys move to the neighbors on the ring and start cold, while the single-flight loads keep the database from being flooded.',
+          'If a primary fails, its replica is promoted. If the whole shard is lost, its keys move to the neighbors on the ring and start cold, while single-flight loads bound the work per key and a cap on concurrent loads bounds the total, so the database is not flooded.',
         tradeoff:
           'Replicas double the memory bill in exchange for fast failover. Without them, losing a node is still safe, but the database absorbs a burst of misses until the keys warm up again.',
         nodes: ['ring', 'shardA', 'shardC', 'loader'],

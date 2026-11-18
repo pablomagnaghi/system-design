@@ -184,3 +184,29 @@ describe('design depth sections', () => {
     }
   });
 });
+
+// Precision rules (CLAUDE.md): absolute delivery and durability claims are the mistakes an audit
+// found most often. Each reviewed use is counted here; a new one fails until it is checked
+// against the rules (condition stated, dedup key named, or the claim negated) and added.
+describe('precision guard', () => {
+  const RISKY = /exactly[- ]once|sent once|never los[te]/gi;
+  const REVIEWED: Record<string, number> = {
+    'ad-click-aggregator': 1,
+    'chat-messaging': 2,
+    'collaborative-editor': 1,
+    'file-sync': 2,
+    'job-scheduler': 3,
+    'news-aggregator': 1,
+    'payment-webhooks': 2,
+    'photo-sharing': 1,
+    'stock-trading': 1,
+    'video-streaming': 1,
+  };
+
+  it('has no unreviewed "exactly once", "sent once" or "never lost" claim', () => {
+    for (const item of [...designs, ...fieldNotes]) {
+      const found = JSON.stringify(item).match(RISKY)?.length ?? 0;
+      expect(found, item.slug).toBeLessThanOrEqual(REVIEWED[item.slug] ?? 0);
+    }
+  });
+});
