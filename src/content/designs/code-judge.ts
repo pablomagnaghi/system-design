@@ -225,7 +225,7 @@ export const codeJudge: Design = {
         narration:
           'The API puts a job on the queue for that language and answers 202 with the submission ID. The API servers never execute user code and never wait for a run.',
         tradeoff:
-          'Running code inside the request would make API capacity depend on the slowest submission and give a burst nowhere to wait. A queue adds a hop and a few hundred milliseconds, and in exchange runs are retried after a crash and the queue absorbs any spike.',
+          'Running code inside the request would make API capacity depend on the slowest submission and give a burst nowhere to wait. A queue adds a hop and a few hundred milliseconds, and in exchange runs are retried after a crash and the queue absorbs any spike. Storing the row and enqueueing the job are two separate writes, so a sweeper re-enqueues any submission still "queued" past a deadline; a job that ends up queued twice is harmless because the verdict write is conditional.',
         nodes: ['api', 'queue'],
         travel: [['api', 'queue', 'job']],
         short: 'Queue',
@@ -339,9 +339,9 @@ export const codeJudge: Design = {
       {
         title: 'Update the live leaderboard',
         narration:
-          'An accepted contest verdict updates the contestant’s entry in a sorted set for the contest, scored by problems solved and then by penalty time. Readers get the top page from a copy cached for two seconds, and their own rank with one lookup.',
+          'An accepted contest verdict updates the contestant’s entry in a sorted set for the contest, scored by problems solved and then by penalty time. The update sets the score from the contestant’s standing in the submissions table, counting only the first accepted run of each problem, and never adds to the old score. The runner acknowledges the job only after this update. Readers get the top page from a copy cached for two seconds, and their own rank with one lookup.',
         tradeoff:
-          'Recomputing standings from the submissions table on every view would melt the database at the end of a contest. A sorted set gives ranks in logarithmic time and costs a second copy of the truth, which can be rebuilt from verdicts if it is ever lost.',
+          'Recomputing standings from the submissions table on every view would melt the database at the end of a contest. A sorted set gives ranks in logarithmic time and costs a second copy of the truth, which can be rebuilt from verdicts if it is ever lost. Jobs are delivered at least once, and an increment per accepted verdict would count a redelivered job or a second accepted solution twice. Setting the score from the standing costs one indexed read per accepted run and makes every repeat write the same value.',
         nodes: ['runners', 'board', 'readers'],
         travel: [
           ['runners', 'board', 'accepted'],
@@ -413,7 +413,7 @@ export const codeJudge: Design = {
         },
         {
           name: 'A sorted set updated on each accepted verdict',
-          pros: 'Ranks and pages in logarithmic time; one update per accepted run.',
+          pros: 'Ranks and pages in logarithmic time; one update per accepted run, safe to repeat when it sets the score instead of incrementing it.',
           cons: 'A derived copy that must be rebuilt if lost or if a verdict is overturned by a rejudge.',
         },
         {
@@ -423,7 +423,7 @@ export const codeJudge: Design = {
         },
       ],
       choice:
-        'A sorted set per contest whose score packs problems solved and penalty time into one number, updated on each accepted verdict, with the top page cached for a couple of seconds. The submissions table stays the source of truth for rebuilds, rejudges and the final standings.',
+        'A sorted set per contest whose score packs problems solved and penalty time into one number, set from the contestant’s standing on each accepted verdict so a repeated update changes nothing, with the top page cached for a couple of seconds. The submissions table stays the source of truth for rebuilds, rejudges and the final standings.',
     },
   ],
   wrapUp:
