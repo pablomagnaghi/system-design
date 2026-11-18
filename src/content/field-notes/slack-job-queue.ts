@@ -154,9 +154,9 @@ export const slackJobQueue: FieldNote = {
       {
         title: 'Relay from Kafka into Redis',
         narration:
-          'JQRelay, another stateless Go service, reads a topic and writes its jobs to the matching Redis cluster, where workers pick them up as before. Each instance grabs a Consul lock for a topic before relaying it, so every topic has exactly one relay, and a replacement instance from the auto-scaling group takes over a lost lock. Rate limits also live in Consul and apply as soon as they change.',
+          'JQRelay, another stateless Go service, reads a topic and writes its jobs to the matching Redis cluster, where workers pick them up as before. Each instance grabs a Consul lock for a topic before relaying it, so each topic normally has a single relay, and a replacement instance from the auto-scaling group takes over a lost lock. Rate limits also live in Consul and apply as soon as they change.',
         tradeoff:
-          'Workers and Redis did not have to change, which kept the rollout safe. The relay decodes and re-encodes each job, and Go and PHP escape JSON characters differently, so payloads that used to round-trip in PHP alone suddenly did not.',
+          'Workers and Redis did not have to change, which kept the rollout safe. The relay decodes and re-encodes each job, and Go and PHP escape JSON characters differently, so payloads that used to round-trip in PHP alone suddenly did not. The post describes the lock as giving each topic exactly one relay; a relay that stalls without noticing it lost the lock could briefly overlap with its replacement, which duplicates jobs rather than losing them.',
         nodes: ['kafka', 'relay', 'consul', 'redis', 'workers'],
         travel: [
           ['kafka', 'relay'],
@@ -182,7 +182,7 @@ export const slackJobQueue: FieldNote = {
         narration:
           'The relay commits its Kafka offset only after a job is safely in Redis. If Redis is down it keeps retrying until Redis is back, and a job that fails on its own is written back to Kafka instead of blocking its partition or being dropped.',
         tradeoff:
-          'Retrying forever means a Redis problem shows up as lag in Kafka rather than as lost jobs, which is the point. Re-enqueueing a broken job keeps the queue moving but can send the same job around more than once.',
+          'Committing the offset only after the Redis write is at-least-once delivery: a relay that dies between the write and the commit relays the job again. A Redis problem shows up as lag in Kafka rather than as lost jobs, which is the point, as long as it clears within the two days of retention; the leader-only acknowledgement on enqueue can still lose a job before it gets this far. Re-enqueueing a broken job keeps the queue moving but can send the same job around more than once.',
         nodes: ['kafka', 'relay', 'redis'],
         travel: [['relay', 'redis', 'relay']],
         short: 'Retry',
@@ -278,7 +278,7 @@ export const slackJobQueue: FieldNote = {
   takeaways: [
     'Put a durable log in front of an in-memory queue so a backlog grows on disk instead of exhausting memory, and drain it into the fast store at a controlled rate.',
     'Prefer the smallest change that removes the failure mode: keep the existing interfaces and add the buffer in front, rather than rewriting scheduling and execution at once.',
-    'Give each partition a single consumer with a lock (Consul here) and advance the offset only after the downstream write succeeds.',
+    'Give each topic a single consumer with a lock (Consul here) and advance the offset only after the downstream write succeeds. That is at-least-once delivery, so plan for duplicates.',
     'Roll out with double writes, a shadow consumer that discards, per-hop counts and heartbeat canaries on every partition before moving real traffic.',
   ],
   related: ['job-scheduler', 'notification-system'],
