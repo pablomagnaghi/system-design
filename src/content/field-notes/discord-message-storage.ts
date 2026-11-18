@@ -172,7 +172,7 @@ export const discordMessageStorage: FieldNote = {
         narration:
           'When many requests ask for the same row at the same moment, the first one starts the database query and the others wait for its answer. A burst of readers on one channel becomes a single read on the partition.',
         tradeoff:
-          'Coalescing turns a crowd into one query without any cache to invalidate, because it only shares answers that are in flight. It only helps when the duplicate requests reach the same process at the same time, which is what the next step arranges.',
+          'Coalescing turns a crowd into one query without any cache to invalidate, because it only shares answers that are in flight. A request that joins a query already in flight can get an answer read just before a write that has since finished, a staleness window as short as one query. It only helps when the duplicate requests reach the same process at the same time, which is what the next step arranges.',
         nodes: ['data', 'cassandra'],
         travel: [
           ['api', 'data', 'gRPC'],
