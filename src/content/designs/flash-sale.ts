@@ -37,7 +37,7 @@ export const flashSale: Design = {
     },
     {
       name: 'Order',
-      description: 'The durable record of a paid purchase, unique per sale and buyer.',
+      description: 'The durable record of a paid purchase, unique per reservation.',
     },
   ],
   api: [
@@ -226,9 +226,9 @@ export const flashSale: Design = {
       {
         title: 'Log the reservation before answering',
         narration:
-          'The reservation is appended to a durable log before the buyer hears "reserved". A writer turns each entry into a row in the orders database, keyed by sale and buyer, so a replayed entry changes nothing.',
+          'The reservation is appended to a durable log before the buyer hears "reserved". A writer turns each entry into a row in the orders database, keyed by the reservation id assigned in the atomic step, so a replayed entry changes nothing and a buyer allowed several units keeps each of their reservations.',
         tradeoff:
-          'Answering from memory alone is fastest, and a crash of the counter would then lose reservations buyers were promised. Writing to a log adds a few milliseconds, and the database can fill in asynchronously at its own pace while the unique key catches any duplicate.',
+          'Answering from memory alone is fastest, and a crash of the counter would then lose reservations buyers were promised. Writing to a log adds a few milliseconds, and the database can fill in asynchronously at its own pace while the unique key catches any duplicate. The decrement and the append are two steps: a crash between them leaves a unit taken with no reservation, which undersells by one and never oversells, and a periodic comparison of the counter with the logged reservations returns that unit.',
         nodes: ['counter', 'stream', 'writer', 'db'],
         travel: [
           ['counter', 'stream'],
@@ -263,7 +263,7 @@ export const flashSale: Design = {
           ['payments', 'db', 'confirm'],
         ],
         short: 'Pay',
-        metrics: { users: '1M', requestsPerSecond: '20K', p95Latency: '300 ms', errorRate: '0.2%' },
+        metrics: { users: '1M', requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.2%' },
         load: { checkout: 30, payments: 45, db: 35 },
       },
       {
@@ -275,19 +275,19 @@ export const flashSale: Design = {
         nodes: ['expiry', 'counter', 'room'],
         travel: [['expiry', 'counter', 'release']],
         short: 'Release',
-        metrics: { users: '1M', requestsPerSecond: '20K', p95Latency: '300 ms', errorRate: '0.2%' },
+        metrics: { users: '1M', requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.2%' },
         load: { expiry: 30, counter: 20, room: 25 },
       },
       {
         title: 'The database has the last word',
         narration:
-          'The orders database is the source of truth. If the counter is lost, the sale pauses, the writer drains the reservation log into the database, and only then is the counter rebuilt as stock minus active reservations. Rebuilding before the log is drained would miss reservations and oversell. After the sale, paid orders are reconciled against stock and the per-buyer unique key.',
+          'The orders database is the source of truth. If the counter is lost, the sale pauses, the writer drains the reservation log into the database, and only then is the counter rebuilt as stock minus active reservations. Rebuilding before the log is drained would miss reservations and oversell. After the sale, paid orders are reconciled against stock and the per-buyer limit.',
         tradeoff:
           'Trusting the in-memory counter forever would be simpler, and a bug or failover could then oversell silently. Reconciling against durable records costs a recovery procedure and an audit job, and makes any drift visible and fixable.',
         nodes: ['db', 'counter', 'writer'],
         travel: [['writer', 'db']],
         short: 'Reconcile',
-        metrics: { users: '1M', requestsPerSecond: '20K', p95Latency: '300 ms', errorRate: '0.2%' },
+        metrics: { users: '1M', requestsPerSecond: '200', p95Latency: '300 ms', errorRate: '0.2%' },
         load: { db: 40, counter: 15, writer: 25 },
         traffic: [{ edge: ['writer', 'db'], kind: 'heavy' }],
       },
