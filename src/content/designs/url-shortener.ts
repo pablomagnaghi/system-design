@@ -18,7 +18,7 @@ export const urlShortener: Design = {
       'Reads outnumber writes by about a hundred to one; billions of links stored over time.',
       'Codes are unique and short: seven characters or fewer.',
       'Redirects stay up even when link creation or analytics are degraded.',
-      'Only authenticated, rate-limited callers create links; only the owner sees stats or deletes a link, and a takedown stops redirects within a minute.',
+      'Only authenticated, rate-limited callers create links; only the owner sees stats; only the owner, or the trust team through an audited admin role, deletes a link. An acknowledged takedown stops redirects within a minute while the cache accepts writes; if it does not, the bound is the 6-hour cache TTL.',
     ],
     outOfScope: [
       'Spam and malware scanning of target URLs (a separate pipeline would check them and call the takedown path).',
@@ -46,18 +46,18 @@ export const urlShortener: Design = {
       method: 'GET',
       path: '/{code}',
       description:
-        'Redirects to the long URL with a 302. Returns 404 if the code never existed, and 410 Gone if it expired or was deleted.',
+        'Redirects to the long URL with a 302. Returns 404 if the code never existed, and 410 Gone if it expired or was deleted; the store can tell them apart because expired and deleted links stay as tombstones.',
     },
     {
       method: 'DELETE',
       path: '/links/{code}',
       description:
-        'Owner only. Marks the link deleted and invalidates it in the cache; redirects stop within seconds, and the takedown is verified within a minute.',
+        'Owner, or the trust team through an audited admin role. Marks the link deleted, clears its URL and keeps the code as a tombstone, then invalidates it in the cache; redirects stop within seconds, and the takedown is verified within a minute.',
     },
     {
       method: 'GET',
       path: '/links/{code}/stats',
-      description: 'Click counts for the owner, a few seconds behind real time.',
+      description: 'Owner only. Click counts, a few seconds behind real time.',
     },
   ],
   dataFlow: [
@@ -190,7 +190,7 @@ export const urlShortener: Design = {
       {
         title: 'A link goes viral',
         narration:
-          'One link is shared widely and clicks jump a hundredfold. Every click is still a read on the link store, and the partition that holds the viral code saturates: latency climbs and some redirects time out.',
+          'One link is shared widely and clicks climb to about 100K a second, the peak the design is sized for (about 2.5 times its 40K average). Every click is still a read on the link store, and the partition that holds the viral code saturates: latency climbs and some redirects time out.',
         tradeoff:
           'Adding store nodes barely helps, because every one of those reads targets the same key on the same partition. Reads outnumber writes by orders of magnitude and a few codes take most of them, which is exactly the shape a cache is built for.',
         nodes: ['gateway', 'redirect', 'store'],
@@ -222,7 +222,12 @@ export const urlShortener: Design = {
         nodes: ['redirect', 'cache'],
         travel: [['redirect', 'cache']],
         short: 'Cache hit',
-        metrics: { users: '10M', requestsPerSecond: '100K', p95Latency: '8 ms', errorRate: '0.1%' },
+        metrics: {
+          users: '10M',
+          requestsPerSecond: '100K',
+          p95Latency: '8 ms',
+          errorRate: '0.01%',
+        },
         load: { redirect: 45, cache: 35, store: 8 },
       },
       {
@@ -237,8 +242,8 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '12 ms',
-          errorRate: '0.1%',
+          p95Latency: '9 ms',
+          errorRate: '0.01%',
         },
         load: { cache: 38, store: 12 },
       },
@@ -254,8 +259,8 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '12 ms',
-          errorRate: '0.1%',
+          p95Latency: '9 ms',
+          errorRate: '0.01%',
         },
         load: { redirect: 45 },
       },
@@ -274,17 +279,17 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '12 ms',
-          errorRate: '0.1%',
+          p95Latency: '9 ms',
+          errorRate: '0.01%',
         },
         load: { redirect: 45, clicks: 40, counts: 20 },
       },
       {
         title: 'Take a link down',
         narration:
-          'A link turns out to point at a phishing page. The owner or the trust team deletes it: the shorten service marks it deleted in the store first, then overwrites its cache entry with a "deleted" marker instead of removing the key. Redirects answer 410 Gone once the local caches age out, within seconds, and a request through the redirect path confirms it.',
+          'A link turns out to point at a phishing page. The owner, or the trust team through an audited admin role, deletes it. The shorten service first queues a delayed follow-up message, then marks the link deleted in the store, then overwrites its cache entry with a "deleted" marker instead of removing the key. Redirects answer 410 Gone once the local caches age out, within seconds. Ten seconds later a worker takes the follow-up, writes the marker again and confirms the 410 with a request through the redirect path.',
         tradeoff:
-          'Caching links for 6 hours is what makes redirects cheap, so a takedown needs its own careful path. Overwriting instead of removing the key means a fill racing with the delete finds the key present and cannot bring the old URL back, because fills only add absent keys. A failed cache write is retried from a queue and alarms when retries run out, since a lost invalidation would let the link work until the TTL ends.',
+          'Caching links for 6 hours is what makes redirects cheap, so a takedown needs its own careful path. Overwriting instead of removing the key means a fill racing with the delete finds the key present and cannot bring the old URL back, because fills only add absent keys. The store write and the cache write are two steps that a crash can separate, so the follow-up is queued before either. It is delivered at least once, made harmless because the marker write and the check are idempotent, and it alarms when its retries run out, since a lost invalidation would let the link work until the TTL ends.',
         nodes: ['gateway', 'shorten', 'store', 'cache'],
         travel: [
           ['gateway', 'shorten'],
@@ -295,25 +300,25 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '12 ms',
-          errorRate: '0.1%',
+          p95Latency: '9 ms',
+          errorRate: '0.01%',
         },
         load: { shorten: 15, store: 12, cache: 38 },
       },
       {
         title: 'Expire old links',
         narration:
-          'Links past their expiry are rejected at read time, and the store’s own expiry (DynamoDB TTL) deletes them later in the background, at no write cost. Codes are not reused.',
+          'Links past their expiry are rejected at read time with 410 Gone. The item is never removed from the store: a delete clears the long URL at once, a slow background sweep clears it for expired links, and the code and its state stay behind as a tombstone, with no store TTL on the item. Codes are not reused.',
         tradeoff:
-          'Checking expiry on read means correctness never depends on the cleanup running on time, which matters because TTL deletion can lag by days. Never reusing codes wastes a sliver of the code space, but prevents an old printed link from silently pointing somewhere new.',
+          'Checking expiry on read means correctness never depends on the sweep running on time. The tombstone is what keeps the 410 true and the code taken: if the store removed the item, as DynamoDB TTL would, the code would look like one that never existed, answer 404, and a custom alias would pass the put-if-absent again. The cost is a small item per dead link forever and a sliver of the code space, which buys that an old printed link never silently points somewhere new.',
         nodes: ['store', 'cache'],
         travel: [],
         short: 'Expire',
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '12 ms',
-          errorRate: '0.1%',
+          p95Latency: '9 ms',
+          errorRate: '0.01%',
         },
       },
     ],
@@ -344,7 +349,7 @@ export const urlShortener: Design = {
           from: 'alb',
           to: 'svc',
           label: 'forward with user id',
-          note: 'The service validates and normalizes the URL: scheme http or https only, length capped.',
+          note: 'The service applies the per-caller rate limit on the verified user ID, since an ALB does not rate limit and the WAF rule in front only caps each source IP. It then validates and normalizes the URL: scheme http or https only, length capped.',
         },
         {
           from: 'svc',
@@ -362,7 +367,7 @@ export const urlShortener: Design = {
           from: 'svc',
           to: 'links',
           label: 'PutItem code=k3XbQ9a if attribute_not_exists',
-          note: 'The same conditional write settles a custom alias race. If a generated code hits an existing alias, the server skips that ID and takes the next. DynamoDB acknowledges after writing across zones.',
+          note: 'The same conditional write settles a custom alias race. If a generated code hits an existing alias, the server skips that ID and takes the next. DynamoDB acknowledges once a quorum of its replicas, which sit in different zones, has the write.',
         },
         {
           from: 'svc',
@@ -480,7 +485,7 @@ export const urlShortener: Design = {
       title: 'Count clicks',
       kind: 'queue',
       summary:
-        'Aggregators read the click stream, sum clicks per code over a few seconds and write the totals together with the stream position they reached, in one transaction.',
+        'Aggregators read the click stream, sum clicks per code over a few seconds and write the totals together with the stream position they reached, in one transaction that commits only if the position has not moved.',
       runsOn: 'Kinesis Data Streams → aggregator on ECS (KCL) → Aurora PostgreSQL → stats endpoint',
       participants: [
         { id: 'stream', label: 'Click stream', service: 'Kinesis Data Streams' },
@@ -505,8 +510,8 @@ export const urlShortener: Design = {
         {
           from: 'agg',
           to: 'db',
-          label: 'BEGIN; upsert counts; UPDATE offsets SET seq; COMMIT',
-          note: 'The stream position is stored in the same transaction as the counts. After a crash the worker resumes from it, so a batch is never added twice and never skipped.',
+          label: 'BEGIN; upsert counts; UPDATE offsets SET seq=:new WHERE seq=:start; COMMIT',
+          note: 'The stream position advances in the same transaction as the counts, and only if it still equals the position this batch started from (WHERE shard=:s AND seq=:start). Two workers can hold one shard for a moment while it moves between them; the slower one updates zero rows and rolls back, so a batch is never added twice. After a crash the worker resumes from the stored position and skips records at or below it, so none is skipped either.',
         },
         {
           from: 'ana',
@@ -521,46 +526,46 @@ export const urlShortener: Design = {
       title: 'Delete or take down a link',
       kind: 'async',
       summary:
-        'A link turns out to point at a phishing page. The delete marks it in the store, writes a "deleted" marker over the cached entry, and checks a few seconds later that the redirect now fails.',
-      runsOn: 'Shorten service on ECS → DynamoDB → ElastiCache → SQS retry queue',
+        'A link turns out to point at a phishing page. The delete queues a delayed follow-up, marks the link in the store and writes a "deleted" marker over the cached entry. The follow-up repeats the marker and checks a few seconds later that the redirect now fails.',
+      runsOn: 'Shorten service on ECS → SQS (delayed follow-up) → DynamoDB → ElastiCache',
       participants: [
         { id: 'owner', label: 'Owner or trust team', service: 'Client' },
         { id: 'svc', label: 'Shorten service', service: 'ECS Fargate' },
         { id: 'links', label: 'Link store', service: 'DynamoDB' },
         { id: 'cache', label: 'Shared cache', service: 'ElastiCache for Valkey' },
-        { id: 'retry', label: 'Retry queue', service: 'SQS' },
+        { id: 'retry', label: 'Follow-up queue', service: 'SQS' },
       ],
       steps: [
         {
           from: 'owner',
           to: 'svc',
           label: 'DELETE /links/k3XbQ9a',
-          note: 'Only the owner, or the trust team acting on a report from the scanning pipeline. Every takedown is logged.',
+          note: 'Only the owner, or the trust team through an audited admin role, usually acting on a report from the scanning pipeline. Every takedown is logged.',
+        },
+        {
+          from: 'svc',
+          to: 'retry',
+          label: 'SendMessage {code}, delay 10 s',
+          note: 'Queued before the store write, so a crash after that write cannot lose the follow-up. If this send fails, the delete fails and nothing has changed.',
         },
         {
           from: 'svc',
           to: 'links',
-          label: 'UpdateItem deleted=true',
-          note: 'The store first, so any later miss reads the deleted state. The code is never reused.',
+          label: 'UpdateItem deleted=true, remove url',
+          note: 'The store before the cache, so any later miss reads the deleted state. The item stays as a tombstone: the code answers 410 and is never reused.',
         },
         {
           from: 'svc',
           to: 'cache',
           label: 'SET link:k3XbQ9a "deleted"',
-          note: 'Overwrites instead of removing the key, so a fill racing with the delete finds the key present and cannot bring the old URL back.',
+          note: 'Overwrites instead of removing the key, so a fill racing with the delete finds the key present and cannot bring the old URL back. If this write fails, the follow-up repeats it.',
         },
         {
-          from: 'svc',
-          to: 'retry',
-          label: 'on failure: enqueue invalidation',
-          note: 'A failed cache write is retried from the queue; retries exhausted raise an alarm, since the fallback bound is the 6-hour TTL.',
-          style: 'async',
-        },
-        {
-          from: 'svc',
+          from: 'retry',
           to: 'svc',
-          label: 'after 10 s: GET /k3XbQ9a expects 410',
-          note: 'Local caches have aged out by then. A takedown is done only when the redirect path itself says so.',
+          label: 'after 10 s: SET marker again, GET /k3XbQ9a expects 410',
+          note: 'A worker reads the row with a consistent read; if it is not deleted, the delete failed and the message is dropped. Otherwise it writes the marker again and requests the code through the redirect path, where local caches have aged out by then. The message is removed only on a 410, so it is delivered at least once, made harmless because both actions are idempotent. Retries exhausted raise an alarm, since the fallback bound is the 6-hour TTL.',
+          style: 'async',
         },
       ],
     },
@@ -655,7 +660,7 @@ export const urlShortener: Design = {
         {
           name: 'A relational database',
           pros: 'Unique index, transactions and easy queries by owner.',
-          cons: '95 TB and thousands of reads a second mean sharding it ourselves.',
+          cons: '32 TB of rows, 95 TB with our own replicas, and thousands of reads a second mean sharding it ourselves.',
         },
         {
           name: 'A self-managed wide-column store such as Cassandra',
@@ -664,12 +669,12 @@ export const urlShortener: Design = {
         },
         {
           name: 'A managed key-value store (DynamoDB)',
-          pros: 'Partitioned by code, conditional writes, writes acknowledged across three zones, built-in TTL, and no servers to run.',
+          pros: 'Partitioned by code, conditional writes, each write acknowledged by a quorum of replicas spread over three zones, and no servers to run.',
           cons: 'One partition serves about 3,000 reads a second, so a viral key needs the cache; queries by owner need a secondary index.',
         },
       ],
       choice:
-        'DynamoDB, keyed by code, with a secondary index by owner for "my links" and TTL for cleanup. The relational database is the MVP and the right choice until sharding it becomes the work.',
+        'DynamoDB, keyed by code, with a secondary index by owner for "my links" and no TTL on the table, because expired and deleted links stay as tombstones. The relational database is the MVP and the right choice until sharding it becomes the work.',
     },
     {
       question: 'Could redirects run at the edge instead?',
@@ -701,7 +706,7 @@ export const urlShortener: Design = {
       {
         property: 'Code uniqueness',
         promise:
-          'A code maps to at most one link, forever. The allocator records the new high-water mark with a synchronously replicated, conditional write before it returns a range, so ranges are disjoint; the shuffle is a bijection, so distinct IDs give distinct codes. Every insert, generated or custom, is a put-if-absent, which settles alias races and catches a generated code that lands on an existing alias: the server skips that ID and takes the next one.',
+          'A code maps to at most one link, forever. The allocator records the new high-water mark with an atomic increment acknowledged by a quorum of replicas before it returns a range, so ranges are disjoint; the shuffle is a bijection, so distinct IDs give distinct codes. Every insert, generated or custom, is a put-if-absent, which settles alias races and catches a generated code that lands on an existing alias: the server skips that ID and takes the next one. Expired and deleted links stay in the store as tombstones, so the same put-if-absent keeps rejecting their codes and no code, generated or alias, is ever reused.',
       },
       {
         property: 'Durability of a created link',
@@ -711,12 +716,12 @@ export const urlShortener: Design = {
       {
         property: 'Redirect freshness',
         promise:
-          'Redirects are eventually consistent with bounded staleness. Expiry is enforced on every read, cached or not, to within clock skew. A deleted link stops redirecting once the shared entry is invalidated and the local caches age out, which is seconds; if the invalidation is lost, the bound is the shared TTL of 6 hours.',
+          'Redirects are eventually consistent with bounded staleness. Expiry is enforced on every read, cached or not, to within clock skew. A deleted link stops redirecting once the shared entry is invalidated and the local caches age out, which is seconds; if the cache cannot be written and the queued follow-up runs out of retries, the bound is the shared TTL of 6 hours.',
       },
       {
         property: 'Click counting',
         promise:
-          'Best effort into the stream: the redirect server emits each event at most once and drops it if the stream is unavailable. From the stream to the counts, events are processed at least once, made harmless by storing each partition offset in the same transaction as the counts it produced. Counts can therefore run low, never high.',
+          'Best effort into the stream: the redirect server emits each event at most once and drops it if the stream is unavailable. From the stream to the counts, events are processed at least once, made harmless by advancing each shard position in the same transaction as the counts it produced, and only if the position is still where the batch started. Counts can therefore run low, never high.',
       },
       {
         property: 'Redirect availability',
@@ -734,7 +739,7 @@ export const urlShortener: Design = {
     doesNotGuarantee: [
       'Unguessable codes. The shuffle hides creation order but is not a secret; private links need long random tokens or an access check.',
       'Exact click counts. Events are dropped when the stream is down or a redirect server dies with events still in memory, so counts are not fit for billing.',
-      'Instant takedown. A deleted link can redirect for a few seconds, and for up to the 6-hour TTL in the worst case of a lost invalidation.',
+      'Instant takedown. A deleted link can redirect for a few seconds, and for up to the 6-hour TTL in the worst case of an invalidation that never lands.',
       'One code per URL. Shortening the same URL twice, or retrying a timed-out create, gives two codes.',
       'Dense IDs. A crashed or restarted server abandons the rest of its range.',
     ],
@@ -747,7 +752,7 @@ export const urlShortener: Design = {
       detection:
         'Cache hit ratio falling below its normal band, with store read latency and throttled reads rising at the same time.',
       recovery:
-        'Consistent hashing limits a node loss to that node’s share of keys. Local caches keep the hottest codes for a few seconds, each redirect server collapses concurrent misses for one code into a single store read, and a cap on in-flight store reads sheds the excess as fast errors. The cache refills from clicks within minutes; no data is lost because the cache holds nothing the store does not.',
+        'A node loss affects only that shard’s slots, and its replica takes over with whatever was replicated. Local caches keep the hottest codes for a few seconds, each redirect server collapses concurrent misses for one code into a single store read, and a cap on in-flight store reads sheds the excess as fast errors. The cache refills from clicks within minutes; no data is lost because the cache holds nothing the store does not.',
     },
     {
       scenario:
@@ -762,11 +767,11 @@ export const urlShortener: Design = {
     {
       scenario: 'The allocator fails over to a replica.',
       impact:
-        'Shorten servers keep creating from the ranges they already hold, which lasts minutes at peak rates, then creates fail; redirects are unaffected. If the high-water mark were replicated asynchronously, the new primary could issue a range a second time.',
+        'Shorten servers keep creating from the ranges they already hold, which at 400 creates a second lasts tens of seconds, a minute or two at best, then creates fail; redirects are unaffected. If the high-water mark were replicated asynchronously, the new primary could issue a range a second time.',
       detection:
         'Lease error rate and lease latency for the outage. For a reissued range, a counter of put-if-absent conflicts on generated codes, which is otherwise near zero and alarms on any burst.',
       recovery:
-        'With synchronous replication the new primary continues from the last recorded mark. If a range is reissued anyway, the conditional insert rejects each duplicate, the server abandons the range and leases another, and no link is overwritten.',
+        'Because every increment is acknowledged by a quorum, the new primary continues from the last recorded mark. If a range is reissued anyway, the conditional insert rejects each duplicate, the server abandons the range and leases another, and no link is overwritten.',
     },
     {
       scenario:
@@ -774,9 +779,9 @@ export const urlShortener: Design = {
       impact:
         'The link keeps redirecting from the shared cache, for up to the 6-hour TTL. For a takedown of a harmful target, that is the worst case that matters.',
       detection:
-        'A verification step in the delete flow that requests the code through the redirect path a few seconds later and expects a 410, plus a count of invalidations that exhausted their retries.',
+        'The queued follow-up of the delete flow, which requests the code through the redirect path about ten seconds later and expects a 410, plus a count of follow-ups that exhausted their retries.',
       recovery:
-        'The delete marks the row deleted in the store first, then overwrites the cache entry with a "deleted" marker instead of removing the key, and fills only add a key that is absent, so a late fill cannot replace the marker. Failed invalidations are retried from a queue. Local caches clear on their own within seconds.',
+        'The delete queues its follow-up before it touches the store, so a crash between the store write and the cache write cannot lose the invalidation. It then marks the row deleted in the store and overwrites the cache entry with a "deleted" marker instead of removing the key, and fills only add a key that is absent, so a late fill cannot replace the marker. The follow-up writes the marker again and is retried until the redirect path answers 410. Local caches clear on their own within seconds.',
     },
     {
       scenario: 'The click stream is unavailable or slow to accept events.',
@@ -794,7 +799,7 @@ export const urlShortener: Design = {
       detection:
         'Consumer lag per partition, alarmed well before it approaches the stream’s retention period.',
       recovery:
-        'A restarted consumer resumes from the offset stored with the counts, so a batch that was applied is not applied again and one that was not is replayed. Lag is worked off by adding consumers up to the partition count.',
+        'A restarted consumer resumes from the offset stored with the counts, so a batch that was applied is not applied again and one that was not is replayed. If two workers hold the same shard for a moment, the conditional offset update lets only one of them commit. Lag is worked off by adding consumers up to the partition count.',
     },
   ],
   capacity: {
@@ -820,7 +825,7 @@ export const urlShortener: Design = {
       {
         label: 'Link storage',
         value: '~32 TB logical, ~95 TB replicated',
-        math: '63B links × 500 bytes ≈ 32 TB; × 3 replicas ≈ 95 TB.',
+        math: '63B links × 500 bytes ≈ 32 TB; × 3 replicas ≈ 95 TB. The estimate counts every link ever created, because expired and deleted links stay as tombstones. A managed store bills the logical 32 TB; the 95 TB applies only when we run the replicas ourselves.',
       },
       {
         label: 'Cache memory',
@@ -865,8 +870,9 @@ export const urlShortener: Design = {
       },
       {
         part: 'Gateway',
-        service: 'Application Load Balancer with path rules; Amazon Cognito for creators',
-        why: 'POST /links goes to the shorten service and /{code} to the redirect fleet, so the two scale and fail separately.',
+        service:
+          'Application Load Balancer with path rules and an AWS WAF rate-based rule; Amazon Cognito for creators',
+        why: 'POST /links goes to the shorten service and /{code} to the redirect fleet, so the two scale and fail separately. An ALB does not rate limit, so the limit has two layers: the WAF rule caps each source IP, and the shorten service enforces the per-caller limit on the verified user ID or API key.',
         watch: 'TargetResponseTime and HTTPCode_Target_5XX_Count per target group.',
       },
       {
@@ -878,14 +884,14 @@ export const urlShortener: Design = {
       {
         part: 'ID allocator',
         service: 'One Amazon DynamoDB item updated with an atomic ADD',
-        why: 'A durable counter replicated across three zones before it answers, touched about every 25 seconds; nothing to run.',
+        why: 'A durable counter: each add is acknowledged by a quorum of replicas in different zones before it answers. Touched about every 25 seconds; nothing to run.',
         watch: 'Errors on the lease call, and the high-water mark growing at the expected pace.',
       },
       {
         part: 'Link store',
         service:
-          'Amazon DynamoDB, partition key code, a secondary index by owner, TTL on expiresAt',
-        why: 'One access pattern, lookup by code; conditional puts for uniqueness; TTL deletes expired links without write cost.',
+          'Amazon DynamoDB, partition key code, a secondary index by owner, no TTL on the table',
+        why: 'One access pattern, lookup by code; conditional puts for uniqueness; expired and deleted items stay as tombstones, so their codes keep answering 410 and can never be registered again.',
         watch:
           'ReadThrottleEvents, SuccessfulRequestLatency, ConditionalCheckFailedRequests (alias races, or a reissued range).',
       },
@@ -914,28 +920,28 @@ export const urlShortener: Design = {
       {
         part: 'Aggregator and counts',
         service: 'Kinesis Client Library workers on Amazon ECS writing to Amazon Aurora PostgreSQL',
-        why: 'Counts and the stream position commit in one transaction, which is what makes replays harmless.',
+        why: 'Counts and the stream position commit in one transaction, conditional on the position the batch started from, which is what makes replays and overlapping workers harmless.',
         watch: 'Aurora CommitLatency and the counts lag behind the stream.',
       },
       {
         part: 'Security',
         service:
-          'Amazon Cognito, IAM roles per service, AWS KMS, AWS CloudTrail, SQS for invalidation retries',
-        why: 'Creators are authenticated; only the redirect fleet reads the cache and only the shorten service writes links; takedowns are logged and retried until they hold.',
+          'Amazon Cognito, IAM roles per service, AWS KMS, AWS CloudTrail, SQS for takedown follow-ups',
+        why: 'Creators are authenticated; only the redirect fleet reads the cache and only the shorten service writes links; the trust team deletes through an audited admin role; takedowns are logged, and a queued follow-up repeats the invalidation until the redirect path confirms it.',
         watch:
-          'Invalidation retries exhausted, takedown verification failures, and CloudTrail for admin deletes.',
+          'Takedown follow-ups that exhausted retries, takedown verification failures, and CloudTrail for admin deletes.',
       },
       {
         part: 'Observability and cost',
         service: 'Amazon CloudWatch dashboards and alarms, AWS Cost Explorer',
-        why: 'One dashboard with the SLOs. The bill is mostly DynamoDB storage for 95 TB over five years and the read path; the cache is what keeps the second small.',
+        why: 'One dashboard with the SLOs. The bill is mostly DynamoDB storage, billed on the logical size of about 32 TB after five years, and the read path; the cache is what keeps the second small.',
         watch: 'The SLO dashboard, and DynamoDB storage and read cost as separate lines.',
       },
     ],
     limits: [
       'One DynamoDB partition serves about 3,000 reads a second, so a viral code at 100K a second can only be served by the cache, never by adding table capacity.',
       'A strongly consistent DynamoDB read costs twice an eventually consistent one; it is used only on cache misses, about 5K a second.',
-      'DynamoDB TTL deletes expired items in the background, typically within a few days, which is why expiry is checked on every read.',
+      'DynamoDB TTL removes the whole item, typically within a few days of its expiry, and a removed item cannot be told from a code that never existed. The links table therefore has no TTL: expiry is checked on every read and the item stays as a tombstone.',
       'A Kinesis shard accepts 1 MB or 1,000 records a second; 100K events a second over 16 shards is about 6,000 events per shard, so events are packed many to a record.',
       'Kinesis keeps data 24 hours by default; retention is raised to 7 days so an aggregator outage of days loses nothing.',
       'A CloudFront KeyValueStore holds at most 5 MB, which rules it out as the link store.',
@@ -983,9 +989,9 @@ export const urlShortener: Design = {
     },
     {
       name: 'Counts falling behind',
-      metric: 'Kinesis GetRecords.IteratorAgeMilliseconds above 5 min',
+      metric: 'Kinesis GetRecords.IteratorAgeMilliseconds above 60 s for 5 min; pages above 5 min',
       meaning:
-        'Aggregators are down or too few; stats are stale but nothing is lost within 7 days.',
+        'Aggregators are down or too few; the 60-second freshness objective is being missed and stats are stale, but nothing is lost within 7 days.',
     },
     {
       name: 'Clicks being dropped',
@@ -1001,7 +1007,7 @@ export const urlShortener: Design = {
     {
       name: 'Takedown not holding',
       metric:
-        'Custom: invalidations that exhausted retries, or a failed takedown verification, above 0',
+        'Custom: takedown follow-ups that exhausted retries, or a failed takedown verification, above 0',
       meaning:
         'A deleted link may keep redirecting for up to the 6-hour TTL; fix the cache entry by hand.',
     },
