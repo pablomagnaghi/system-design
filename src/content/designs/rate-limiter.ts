@@ -12,20 +12,30 @@ export const rateLimiter: Design = {
       'Limit requests per client, identified by API key, user id or IP address.',
       'Support different rules per endpoint and per plan (for example, 100 requests a minute on the free plan).',
       'Reject requests over the limit with HTTP 429 and tell the client when it can retry.',
+      'Apply several rules to one request (for example a plan limit and an endpoint limit) all together: a request either passes every rule or spends nothing.',
+      'Change rules without deploying the gateways, with a rollout that can be rolled back.',
     ],
     nonFunctional: [
       'Low overhead: a few milliseconds at most added to each request.',
       'Highly available: the limiter failing must not take the API down.',
       'Accurate across many gateway instances, not just per instance.',
       'Scale to hundreds of thousands of requests per second and millions of clients, and grow by adding nodes.',
+      'Hard to cheat: the identity used for a bucket comes from authentication or a trusted proxy, never from a header the client controls, and rules change only through a reviewed, audited rollout.',
     ],
     outOfScope: [
       'Defending against volumetric DDoS, which belongs at the network edge.',
-      'Billing and quota purchases.',
+      'Billing, monthly quotas and quota purchases, which need exact durable counts.',
+      'Authentication itself: the limiter receives an identity that was already verified.',
+      'Concurrency limits (requests in flight at once) and cost-weighted limits, where an expensive request spends more than one token.',
+      'Bot and abuse detection that decides who is malicious, as opposed to who is over a limit.',
     ],
   },
   entities: [
-    { name: 'Rule', description: 'Who it applies to, which endpoints, the limit and the window.' },
+    {
+      name: 'Rule',
+      description:
+        'Who it applies to, which endpoints, the refill rate and the burst capacity, with a version number.',
+    },
     { name: 'Client', description: 'The identity being limited: API key, user id or IP address.' },
     {
       name: 'Bucket',
@@ -99,7 +109,9 @@ export const rateLimiter: Design = {
       ['limiter', 'store'],
       ['limiter', 'reject'],
       ['limiter', 'backend'],
+      ['gateway', 'backend'],
     ],
+    edgeStages: [{ edge: ['gateway', 'backend'], stages: [0, 1] }],
     stages: [
       {
         title: 'One client floods the backend',
@@ -108,7 +120,10 @@ export const rateLimiter: Design = {
         tradeoff:
           'Adding backend servers absorbs the spike for a while, but the bill then grows with the worst client instead of real demand, and a bigger loop fills the new servers too. Capping each client at the front door protects everyone else for a fraction of the cost.',
         nodes: ['client', 'gateway', 'backend'],
-        travel: [['client', 'gateway']],
+        travel: [
+          ['client', 'gateway'],
+          ['gateway', 'backend'],
+        ],
         short: 'Flood',
         metrics: {
           users: '1M',
@@ -140,11 +155,14 @@ export const rateLimiter: Design = {
       {
         title: 'Limit at the gateway',
         narration:
-          'A limiter joins the gateway. The check runs as middleware, so every request passes through it before reaching any service, and the flooding client is cut down to its share.',
+          'A limiter joins the gateway. The check runs as middleware, so every request passes through it before reaching any service, and the flooding client is cut down to its share. In this first version each gateway counts in its own memory, which is enough to stop the flood but not to enforce an exact limit: with 30 gateways a client spread over all of them gets up to 30 times its limit.',
         tradeoff:
           'At the gateway, one implementation protects every service and nothing downstream has to change. Limiting inside each service would know more about the request but duplicates logic, and a separate limiter service would add a network hop to every request.',
-        nodes: ['gateway', 'limiter'],
-        travel: [['gateway', 'limiter']],
+        nodes: ['gateway', 'limiter', 'backend'],
+        travel: [
+          ['gateway', 'limiter'],
+          ['limiter', 'backend'],
+        ],
         short: 'Gateway limit',
         metrics: { users: '1M', requestsPerSecond: '150K', p95Latency: '90 ms', errorRate: '0.2%' },
         load: { gateway: 60, limiter: 30, backend: 55 },
@@ -184,7 +202,7 @@ export const rateLimiter: Design = {
         narration:
           'Each client has a bucket that refills at a steady rate and holds a maximum number of tokens. A request spends one token.',
         tradeoff:
-          'A fixed window is simplest but lets a client send double the limit around the window boundary. A sliding log is exact but stores every timestamp. A token bucket needs two numbers per client and allows short, bounded bursts, which matches how real clients behave.',
+          'A fixed window is simplest but lets a client send double the limit around the window boundary. A sliding log is exact but stores every timestamp, and a sliding window counter approximates it with two counters. A leaky bucket queues requests and releases them at a fixed rate, smoothing traffic at the cost of latency. A token bucket needs two numbers per client, answers at once, and allows short, bounded bursts, which matches how real clients behave.',
         nodes: ['store'],
         travel: [],
         short: 'Token bucket',
@@ -218,9 +236,9 @@ export const rateLimiter: Design = {
       {
         title: 'Over the limit: 429',
         narration:
-          'With no token left, the gateway answers 429 Too Many Requests with a Retry-After header, and the backend never sees the request.',
+          'With no token left, the gateway answers 429 Too Many Requests with a Retry-After header, and the backend never sees the request. The gateway also remembers the client as denied until that time and answers its next requests itself, so a client hammering at thousands of requests a second costs the store one call, not thousands.',
         tradeoff:
-          'Rejecting fast protects the backend but pushes work back to the client. Telling it exactly when to retry, and documenting jittered retries, avoids a crowd of clients retrying at the same instant.',
+          'Rejecting fast protects the backend but pushes work back to the client. Telling it exactly when to retry, and documenting jittered retries, avoids a crowd of clients retrying at the same instant. The local denied-until cache protects the store: without it, every rejected request is still a script call on one shard, which is how a single abusive client can saturate it.',
         nodes: ['limiter', 'reject'],
         travel: [['limiter', 'reject']],
         short: '429',
@@ -236,7 +254,7 @@ export const rateLimiter: Design = {
       {
         title: 'When Redis is down',
         narration:
-          'If the store does not answer within a short timeout, the limiter lets the request through, falls back to a generous per-gateway limit and raises an alarm.',
+          'If the store does not answer within a short timeout, the limiter lets the request through, falls back to a per-gateway bucket of a tenth of the plan limit and raises an alarm. A normal client spread over 30 gateways sends each one about a thirtieth of its traffic, so the fallback never rejects it; a runaway client is held to at most 3 times its limit across the fleet.',
         tradeoff:
           'Failing open keeps the product available but removes protection for a while. Failing closed protects the backends but turns a cache outage into a full outage. For most APIs, availability wins and the local fallback limits the damage.',
         nodes: ['limiter', 'store', 'backend'],
@@ -255,6 +273,250 @@ export const rateLimiter: Design = {
       },
     ],
   },
+  flows: [
+    {
+      id: 'allowed',
+      title: 'An allowed request',
+      kind: 'sync',
+      summary:
+        'Ana’s app calls GET /orders with her API key. The gateway checks her plan and endpoint buckets in one script call, about a millisecond, and forwards the request.',
+      runsOn: 'ALB → gateway on ECS Fargate → ElastiCache for Valkey → backend',
+      participants: [
+        { id: 'app', label: 'Ana’s app', service: 'Client' },
+        { id: 'alb', label: 'Load balancer', service: 'ALB + AWS WAF' },
+        { id: 'gw', label: 'Gateway + limiter', service: 'ECS Fargate' },
+        { id: 'store', label: 'Buckets', service: 'ElastiCache for Valkey' },
+        { id: 'api', label: 'Backend', service: 'ECS services' },
+      ],
+      steps: [
+        {
+          from: 'app',
+          to: 'alb',
+          label: 'GET /orders, x-api-key',
+          note: 'WAF has already dropped IP floods far above any plan. It counts over minutes, so it is a coarse guard, not the per-plan limit.',
+        },
+        {
+          from: 'alb',
+          to: 'gw',
+          label: 'forward',
+          note: 'The ALB appends the caller’s address to X-Forwarded-For. The gateway trusts only the entry the ALB added, never one the client wrote.',
+        },
+        {
+          from: 'gw',
+          to: 'gw',
+          label: 'key → client {c42}, plan pro; match rules',
+          note: 'The key is checked against a cached key table, and the rules come from the in-memory snapshot. Two rules apply: the plan limit and the endpoint limit.',
+        },
+        {
+          from: 'gw',
+          to: 'store',
+          label: 'EVALSHA take {c42}:plan {c42}:orders',
+          note: 'Both keys carry the hash tag {c42}, so they sit in one slot on one shard. The script reads the Redis clock, refills each bucket, and takes a token from both or from neither.',
+        },
+        {
+          from: 'store',
+          to: 'gw',
+          label: 'allowed, remaining 57, reset 12 s',
+          note: 'One round trip of about a millisecond, with a timeout of a few milliseconds in case the shard is slow.',
+          style: 'reply',
+        },
+        {
+          from: 'gw',
+          to: 'api',
+          label: 'GET /orders',
+          note: 'Only admitted traffic reaches the backend.',
+        },
+        {
+          from: 'gw',
+          to: 'app',
+          label: '200 + RateLimit-Remaining: 57',
+          note: 'The headers let a well-behaved client slow down before it hits the limit.',
+          style: 'reply',
+        },
+      ],
+    },
+    {
+      id: 'rejected',
+      title: 'A client over its limit',
+      kind: 'sync',
+      summary:
+        'A partner’s broken retry loop sends 3,000 requests a second against a limit of 100 a minute. The first denial costs one script call; the rest are answered from the gateway’s memory.',
+      runsOn: 'Gateway on ECS → ElastiCache once → local denied-until cache',
+      participants: [
+        { id: 'bot', label: 'Partner’s script', service: 'Client' },
+        { id: 'gw', label: 'Gateway + limiter', service: 'ECS Fargate' },
+        { id: 'store', label: 'Buckets', service: 'ElastiCache for Valkey' },
+      ],
+      steps: [
+        {
+          from: 'bot',
+          to: 'gw',
+          label: 'POST /sync (101st this minute)',
+          note: 'The identity is the partner’s API key, so the limit follows the key whatever IP addresses the script uses.',
+        },
+        {
+          from: 'gw',
+          to: 'store',
+          label: 'EVALSHA take {p7}:plan {p7}:sync',
+          note: 'The plan bucket is empty, so the script takes nothing from either bucket and returns when the next token arrives.',
+        },
+        {
+          from: 'store',
+          to: 'gw',
+          label: 'denied, retry in 0.6 s',
+          note: 'Nothing was spent: a denied check leaves both buckets unchanged.',
+          style: 'reply',
+        },
+        {
+          from: 'gw',
+          to: 'gw',
+          label: 'remember p7 denied until +0.6 s',
+          note: 'Until then every gateway that saw the denial answers 429 itself. Without this, each of the 3,000 rejected requests a second would still cost a script call and could saturate the shard.',
+        },
+        {
+          from: 'gw',
+          to: 'bot',
+          label: '429 Too Many Requests, Retry-After: 1',
+          note: 'Retry-After takes whole seconds, so 0.6 s is rounded up. The backend never sees the request. The documentation asks clients to retry with jitter so they do not return together.',
+          style: 'reply',
+        },
+      ],
+    },
+    {
+      id: 'fail-open',
+      title: 'The store stops answering',
+      kind: 'direct',
+      summary:
+        'A shard stops answering. Checks time out after a few milliseconds, the breaker opens, and requests pass under a per-gateway fallback limit until probes succeed.',
+      runsOn: 'Gateway on ECS → ElastiCache (timeout) → local fallback bucket → CloudWatch',
+      participants: [
+        { id: 'app', label: 'Client', service: 'Client' },
+        { id: 'gw', label: 'Gateway + limiter', service: 'ECS Fargate' },
+        { id: 'store', label: 'Buckets', service: 'ElastiCache for Valkey' },
+        { id: 'cw', label: 'Metrics', service: 'CloudWatch' },
+        { id: 'api', label: 'Backend', service: 'ECS services' },
+      ],
+      steps: [
+        {
+          from: 'gw',
+          to: 'store',
+          label: 'EVALSHA … (no reply in 5 ms)',
+          note: 'The check is never retried: a retry would double the latency and could spend a second token.',
+        },
+        {
+          from: 'gw',
+          to: 'gw',
+          label: 'breaker open; take from local fallback bucket',
+          note: 'Each gateway allows a tenth of the plan limit. A normal client reaches each gateway with about a thirtieth of its traffic, so it is never rejected; a runaway client gets at most 30 × a tenth, 3 times its limit.',
+        },
+        {
+          from: 'gw',
+          to: 'api',
+          label: 'forward',
+          note: 'The API stays up. Backends rely on their own headroom and load shedding while the limiter is degraded.',
+        },
+        {
+          from: 'gw',
+          to: 'cw',
+          label: 'FailOpen count, BreakerOpen=1',
+          note: 'Published as custom metrics from every gateway; the fail-open ratio pages within a minute.',
+          style: 'async',
+        },
+        {
+          from: 'gw',
+          to: 'store',
+          label: 'probe every 2 s',
+          note: 'A few probe checks; when they succeed the breaker closes. Buckets refill from elapsed time, capped at capacity, and local counters are dropped.',
+        },
+      ],
+    },
+    {
+      id: 'rule-change',
+      title: 'Change a rule',
+      kind: 'async',
+      summary:
+        'An engineer raises the free plan to 200 requests a minute. The change is validated, rolled out to a few gateways first, and rolled back automatically if the 429 rate jumps.',
+      runsOn:
+        'Pull request → AWS AppConfig deployment → AppConfig agent on each gateway → CloudWatch alarm',
+      participants: [
+        { id: 'eng', label: 'Engineer', service: 'Reviewed PR' },
+        { id: 'cfg', label: 'Rule config', service: 'AWS AppConfig' },
+        { id: 'gw', label: 'Gateways', service: 'ECS + AppConfig agent' },
+        { id: 'cw', label: '429 rate per rule', service: 'CloudWatch alarm' },
+      ],
+      steps: [
+        {
+          from: 'eng',
+          to: 'cfg',
+          label: 'new version 48: free = 200/min',
+          note: 'Rules are versioned and changed only through a reviewed pull request. A validator rejects a limit of zero or a rule that matches every endpoint.',
+        },
+        {
+          from: 'cfg',
+          to: 'gw',
+          label: 'deploy to 10% of gateways, then the rest',
+          note: 'Each gateway’s agent polls every few seconds and swaps its in-memory snapshot. Old and new versions run side by side during the rollout.',
+          style: 'async',
+        },
+        {
+          from: 'gw',
+          to: 'cw',
+          label: '429s per rule, snapshot version',
+          note: 'The deployment watches the alarm on the 429 rate per rule against its baseline.',
+          style: 'async',
+        },
+        {
+          from: 'cw',
+          to: 'cfg',
+          label: 'alarm → roll back to version 47',
+          note: 'Only if the alarm fires. Buckets need no cleanup: a changed limit applies from the next refill.',
+          style: 'reply',
+        },
+      ],
+    },
+    {
+      id: 'rebalance',
+      title: 'Rebalance regional shares',
+      kind: 'scheduled',
+      summary:
+        'Only once the API runs in several regions. A customer’s traffic moves from Virginia to Frankfurt. Every minute a rebalancer moves the share of its global limit toward the region where its requests now arrive.',
+      runsOn:
+        'EventBridge Scheduler → Lambda rebalancer → DynamoDB global table → gateways in each region',
+      participants: [
+        { id: 'sched', label: 'Scheduler', service: 'EventBridge Scheduler' },
+        { id: 'reb', label: 'Rebalancer', service: 'Lambda' },
+        { id: 'shares', label: 'Client shares', service: 'DynamoDB global table' },
+        { id: 'gw', label: 'Gateways', service: 'ECS, every region' },
+      ],
+      steps: [
+        {
+          from: 'sched',
+          to: 'reb',
+          label: 'every minute',
+          note: 'Once a minute is the most EventBridge Scheduler offers, and shares do not need to move faster.',
+          style: 'async',
+        },
+        {
+          from: 'reb',
+          to: 'reb',
+          label: 'admitted and denied per region, clients near their limit',
+          note: 'Only the few thousand clients close to their global limit need a share other than the default split.',
+        },
+        {
+          from: 'reb',
+          to: 'shares',
+          label: 'c42: us-east-1 20%, eu-central-1 80%',
+          note: 'The global table replicates the new shares to every region within about a second.',
+        },
+        {
+          from: 'gw',
+          to: 'shares',
+          label: 'refresh overrides every few seconds',
+          note: 'Gateways pass the region’s share as the bucket’s rate and capacity to the script. Buckets keep their tokens and refill at the new rate.',
+        },
+      ],
+    },
+  ],
   deepDives: [
     {
       question:
@@ -297,7 +559,7 @@ export const rateLimiter: Design = {
         'An atomic script. Correctness is the whole point of a limiter, and the script is a few lines. It reads the time from Redis, not from the gateway, and never lets elapsed time go negative.',
     },
     {
-      question: 'What about multiple regions?',
+      question: 'What changes when the API runs in several regions?',
       options: [
         {
           name: 'One global store',
@@ -311,7 +573,83 @@ export const rateLimiter: Design = {
         },
       ],
       choice:
-        'A store per region. Each region enforces its share locally and shares are rebalanced toward where a client’s traffic is; a client briefly capped below its global limit is cheaper than adding cross-region latency to every request.',
+        'The walkthrough runs in one region. Once the API is in several, a store per region. Each region enforces its share locally and shares are rebalanced toward where a client’s traffic is; a client briefly capped below its global limit is cheaper than adding cross-region latency to every request.',
+    },
+    {
+      question: 'Which algorithm counts the requests?',
+      options: [
+        {
+          name: 'Fixed window counter',
+          pros: 'One counter per client and window; trivial to write.',
+          cons: 'A client can send the full limit at the end of one window and again at the start of the next, double the limit in a moment.',
+        },
+        {
+          name: 'Sliding window log',
+          pros: 'Exact over any window.',
+          cons: 'Stores a timestamp per request, so memory grows with the limit.',
+        },
+        {
+          name: 'Sliding window counter',
+          pros: 'Two counters per client, smooths the boundary by weighting the previous window.',
+          cons: 'An approximation that assumes requests were spread evenly in the previous window.',
+        },
+        {
+          name: 'Leaky bucket',
+          pros: 'Requests queue and leave at a fixed rate, so the backend sees a perfectly smooth flow.',
+          cons: 'A burst waits in the queue instead of being served or rejected, which adds latency, and the queue is state to hold per client.',
+        },
+        {
+          name: 'Token bucket',
+          pros: 'Two numbers per client, a steady rate plus a bounded burst, and refill is computed from elapsed time.',
+          cons: 'Burst size is one more setting to explain to customers.',
+        },
+      ],
+      choice:
+        'A token bucket. It allows the short bursts real clients make, bounds them by capacity, answers at once instead of queueing like a leaky bucket, and needs no background job to refill. A leaky bucket fits when the goal is shaping output to a fixed rate, such as calls to a partner API. A sliding window log is kept for low-volume, high-value limits such as login attempts.',
+    },
+    {
+      question: 'Which identity do we limit, and can a client cheat?',
+      options: [
+        {
+          name: 'The IP address from X-Forwarded-For',
+          pros: 'Present on every request.',
+          cons: 'A client can write any value into the header, and real users share addresses behind offices and carriers.',
+        },
+        {
+          name: 'The API key or user id after authentication',
+          pros: 'Precise and impossible to forge without the secret.',
+          cons: 'Anonymous traffic has none, and someone can create many free accounts.',
+        },
+        {
+          name: 'Best identity available, from trusted sources only',
+          pros: 'Precision for authenticated traffic and coverage for the rest.',
+          cons: 'Several rules per request and some care with proxies.',
+        },
+      ],
+      choice:
+        'The best identity available, taken only from trusted places: the key or user id after authentication, otherwise the address the ALB appended (the rightmost entry of X-Forwarded-For), with IPv6 grouped by /64 so one host cannot rotate through addresses. Creating keys and accounts has its own limits, so a client cannot multiply its quota by signing up again.',
+    },
+    {
+      question: 'Build it, or use what AWS offers?',
+      options: [
+        {
+          name: 'API Gateway usage plans',
+          pros: 'Per-key throttling and quotas configured, not coded.',
+          cons: 'AWS documents them as best effort, not hard limits; a regional account limit of 10,000 requests a second applies by default; and it means moving the API to API Gateway.',
+        },
+        {
+          name: 'AWS WAF rate-based rules',
+          pros: 'Drops floods at the edge before they cost anything.',
+          cons: 'Counts over minutes and reacts with a delay; meant for abuse by IP or header, not per-plan limits per second.',
+        },
+        {
+          name: 'Our own limiter on ElastiCache',
+          pros: 'Exact per-plan and per-endpoint rules, our headers, and control over failure behavior.',
+          cons: 'Code and a cache cluster to run.',
+        },
+      ],
+      choice:
+        'Both layers: WAF rate-based rules as a coarse guard against floods by IP, and our own limiter for the product limits customers see. For an API already on API Gateway with loose limits, usage plans are the cheaper answer.',
     },
   ],
   wrapUp:
@@ -353,7 +691,7 @@ export const rateLimiter: Design = {
     ],
     doesNotGuarantee: [
       'An exact count through a failover. Replication is asynchronous, so a promoted replica can miss the latest decrements; each client gains at most one bucket capacity per failover.',
-      'Any shared limit while the store is unreachable. The fallback counts per gateway, so a client spread over the fleet can get up to the fallback limit multiplied by the number of gateways.',
+      'Any shared limit while the store is unreachable. The fallback counts per gateway, so a client spread over the fleet can get up to the fallback limit multiplied by the number of gateways: with 30 gateways and a fallback of a tenth, 3 times its limit.',
       'One exact global limit across regions. Each region enforces its share, so a client can be capped below its global limit until shares are rebalanced.',
       'That a rule change applies at once. It reaches every gateway within the refresh interval, a few seconds.',
       'Queueing or ordering of rejected requests. A 429 is final for that request and the client decides when to retry.',
@@ -409,7 +747,8 @@ export const rateLimiter: Design = {
         'Rules are versioned, so the fix is to publish the previous version; gateways pick it up on the next refresh. Buckets need no cleanup, since a larger limit simply refills them. Validating rules and rolling them out to a few gateways first keeps this rare.',
     },
     {
-      scenario: 'A region fails and its traffic moves to another region.',
+      scenario:
+        'With the API in several regions, one region fails and its traffic moves to another.',
       impact:
         'Clients arrive in a region where their share of the limit is small, so they are capped below their global limit and see 429s they do not deserve.',
       detection:
@@ -454,8 +793,8 @@ export const rateLimiter: Design = {
       },
       {
         label: 'Worst case while failing open',
-        value: 'Up to 30× the fallback limit',
-        math: '30 gateways × one local fallback bucket each, for a client spread evenly over the fleet. With counters only in gateway memory this would be the normal case.',
+        value: 'Up to 3× the plan limit',
+        math: '30 gateways × a fallback of a tenth of the plan limit = 3× the limit, for a client spread evenly over the fleet. Counting only in gateway memory at the full limit would allow 30×.',
       },
     ],
     implications: [
@@ -466,12 +805,139 @@ export const rateLimiter: Design = {
       'With a third of the clients per primary, a failover is a partial event: two thirds of the traffic keeps an exact count.',
     ],
   },
+  infrastructure: {
+    provider: 'AWS',
+    intro:
+      'One concrete way to run this design on AWS, in one region across three Availability Zones. The services below are examples that fit, not the only option.',
+    items: [
+      {
+        part: 'Edge',
+        service: 'AWS WAF rate-based rules on the Application Load Balancer; AWS Shield Standard',
+        why: 'Volumetric floods and abusive IP addresses are dropped before they reach a gateway, so the limiter only deals with real clients.',
+        watch: 'WAF BlockedRequests per rule, and ALB RequestCount against gateway requests.',
+      },
+      {
+        part: 'API gateway and limiter',
+        service: 'About 30 gateway tasks on Amazon ECS on AWS Fargate behind the ALB',
+        why: 'The check runs as middleware in the process that already handles every request, so no extra hop; tasks scale on request count.',
+        watch:
+          'Custom metrics per gateway: check latency p99, allowed and denied counts, fail-open count and breaker state.',
+      },
+      {
+        part: 'Bucket store',
+        service:
+          'Amazon ElastiCache for Valkey (Redis-compatible), cluster mode, 3 shards of cache.r7g.large with one replica each in another zone',
+        why: 'Atomic scripts, a single-threaded primary per shard, keys spread over 16,384 hash slots, and automatic failover to the replica. Memory is tiny; the shards exist for CPU.',
+        watch:
+          'EngineCPUUtilization per shard (the main thread, not the host CPU), CurrConnections, ReplicationLag, and the failover event.',
+      },
+      {
+        part: 'Rules',
+        service:
+          'AWS AppConfig with a validator, a gradual deployment strategy and an alarm for rollback',
+        why: 'Versioned rules rolled out to a few gateways first and rolled back automatically, read from memory through the AppConfig agent.',
+        watch: 'Deployment state, and the snapshot version and age reported by each gateway.',
+      },
+      {
+        part: 'API keys',
+        service: 'Amazon DynamoDB table of keys, cached in each gateway',
+        why: 'Maps a key to a client and plan without a lookup per request; revocation reaches gateways when the cache expires.',
+        watch: 'ThrottledRequests, and the gateway cache hit rate.',
+      },
+      {
+        part: 'Regional shares (only with several regions)',
+        service:
+          'Amazon DynamoDB global table, updated by an AWS Lambda rebalancer on EventBridge Scheduler',
+        why: 'Overrides for the few clients near their global limit, replicated to every region within about a second.',
+        watch:
+          'ReplicationLatency on the global table, Lambda Errors, and the share given to each region.',
+      },
+      {
+        part: 'Security',
+        service: 'IAM roles per service, AWS KMS, AWS CloudTrail, TLS to ElastiCache',
+        why: 'Only gateways reach the cache, with in-transit encryption and an auth token; KMS keys encrypt the API key table and the cache at rest; rule deployments and key changes are logged.',
+        watch: 'CloudTrail events for AppConfig deployments and key changes.',
+      },
+      {
+        part: 'Observability and cost',
+        service: 'Amazon CloudWatch embedded metrics, dashboards and alarms; AWS Cost Explorer',
+        why: 'One dashboard with the SLOs. The cost is three small cache shards and a little gateway CPU, tiny next to the backend capacity it protects.',
+        watch: 'The SLO dashboard, and the 429 share per client and per rule.',
+      },
+    ],
+    limits: [
+      'ElastiCache cluster mode spreads keys over 16,384 hash slots; a hash tag such as {c42} pins all of a client’s buckets to one slot, which multi-key scripts require.',
+      'A script blocks its shard while it runs, so it stays a few lines with no loops over many keys.',
+      'Replication to the replica is asynchronous, which is why a failover can lose the last decrements.',
+      'A node accepts up to 65,000 client connections, far above 30 gateways with a small pool each.',
+      'API Gateway usage plans are best effort, and the account-level throttle is 10,000 requests a second per region by default.',
+      'WAF rate-based rules count over a window of minutes and take time to start blocking, so they cannot enforce a limit per second.',
+      'EventBridge Scheduler runs at most once a minute, the pace of the share rebalancer.',
+    ],
+  },
+  slos: [
+    {
+      objective: 'Overhead',
+      target: '99% of checks under 2 ms',
+      measure: 'Check latency measured in the gateway around the script call.',
+    },
+    {
+      objective: 'Shared counting',
+      target: '99.9% of checks answered by the store, not the fallback',
+      measure: 'Fail-open count over all checks, per gateway and in total.',
+    },
+    {
+      objective: 'Accuracy',
+      target: 'Admitted rate per client within 1% of its limit outside failovers',
+      measure: 'Admitted requests per client and rule from gateway logs, compared with the rule.',
+    },
+    {
+      objective: 'Rule changes',
+      target: '99% of gateways on a new rule version within 60 s of full rollout',
+      measure: 'Snapshot version reported by each gateway.',
+    },
+  ],
+  alarms: [
+    {
+      name: 'Failing open',
+      metric: 'Custom: fail-open checks above 1% for 1 min (page), or above 0.1% for 1 h (ticket)',
+      meaning:
+        'Clients are only under the per-gateway fallback; check the store before a runaway client reaches the backends. The slower threshold catches a small leak that is burning the 99.9% SLO without an outage.',
+    },
+    {
+      name: 'Shard CPU',
+      metric: 'ElastiCache EngineCPUUtilization above 70% on any shard',
+      meaning:
+        'The first bottleneck: a hot client or growth. Check the denied-until cache, then add a shard.',
+    },
+    {
+      name: 'Slow checks',
+      metric: 'Custom: check latency p99 above 5 ms',
+      meaning: 'The store is saturated or far away; every request is paying for it.',
+    },
+    {
+      name: 'Bad rule',
+      metric: 'Custom: 429 rate for a rule above 3 times its baseline for 2 min',
+      meaning: 'A wrong rule or a real attack; the AppConfig rollout rolls back on this alarm.',
+    },
+    {
+      name: 'Stale rules',
+      metric: 'Custom: rule snapshot older than 5 min on any gateway',
+      meaning: 'The gateway lost its config source and is enforcing old limits.',
+    },
+    {
+      name: 'Limits too loose',
+      metric: 'Backend 5XX or saturation rising while the 429 rate stays flat',
+      meaning:
+        'The limiter is admitting more than the backends can take; the limits or the fallback need tightening.',
+    },
+  ],
   evolution: {
     mvp: 'One Redis primary with a replica, the same atomic token bucket script, rules in a config file shipped with the gateway, one region, fail open. At around 15K requests per second a single primary has plenty of room, and there is nothing to shard or rebalance.',
     atScale: [
-      'At 10x (the 150K/s of the walkthrough): one thread is no longer enough, so the store becomes a cluster sharded by client with a hash tag per client. Rules move to a config store with versioned snapshots, and the per-gateway fallback and the local pre-limit for hot clients are added.',
-      'At 100x (millions of checks per second): the round trip per request becomes the main cost. Gateways lease tokens in batches for busy clients and spend them locally, so the store sees one call per lease. Accuracy drops by at most one unused lease per gateway. Regions get their own stores with split limits.',
-      'At that size, rejected traffic is answered from a local denied-until cache, so abusive clients cost the store almost nothing.',
+      'At 10x (the 150K/s of the walkthrough): one thread is no longer enough, so the store becomes a cluster sharded by client with a hash tag per client. Rules move to a config store with versioned snapshots, and the per-gateway fallback, the local pre-limit and the denied-until cache for hot clients are added.',
+      'At 100x (millions of checks per second): the round trip per request becomes the main cost. Gateways lease tokens in batches for busy clients and spend them locally, so the store sees one call per lease. Accuracy drops by at most one unused lease per gateway.',
+      'Independently of volume, when the API itself runs in several regions for latency or regional failover, each region gets its own store, the global limit is split into regional shares, and a rebalancer moves shares toward where each client’s traffic arrives, as in the regions deep dive.',
     ],
     firstBottleneck:
       'The CPU of a shard primary. Script execution is single threaded, every check is a write, and replicas cannot take any of it. A single hot client makes it worse, because all its checks land on one shard no matter how many shards there are. Memory, storage and the gateways all have a lot of room left when this happens.',
