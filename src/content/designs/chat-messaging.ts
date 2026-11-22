@@ -4,7 +4,7 @@ export const chatMessaging: Design = {
   slug: 'chat-messaging',
   title: 'Chat messaging',
   summary:
-    'Deliver one-to-one and group messages in real time to millions of connected devices, keep them in order, never lose one when a phone is offline or a server dies, and let every device catch up where it left off.',
+    'Deliver one-to-one and group messages in real time to millions of connected devices, keep them in order, never lose a message acknowledged as sent, short of losing the region, when a phone is offline or a server dies, and let every device catch up where it left off.',
   difficulty: 'Hard',
   minutes: 10,
   requirements: {
@@ -18,7 +18,7 @@ export const chatMessaging: Design = {
     ],
     nonFunctional: [
       'Delivery to an online recipient in a couple of hundred milliseconds.',
-      'No message is lost once the sender sees it as sent; order is preserved within a chat.',
+      'No message acknowledged as sent is lost, short of losing the region; order is preserved within a chat.',
       'Hundreds of millions of users, tens of millions connected at once.',
       'Losing a server only causes a reconnect, never missing messages.',
       'Only members of a conversation can send to it, read it or receive it; every connection is authenticated and encrypted in transit.',
@@ -184,7 +184,7 @@ export const chatMessaging: Design = {
         narration:
           'The message service checks that the sender is a member of the conversation, gives the message the next sequence number and appends it to a store partitioned by conversation ID. Only after the write is durable does the sender get an ack, and the pending mark turns into sent.',
         tradeoff:
-          'A per-conversation sequence gives one order every member agrees on, without a global clock. It needs one writer per conversation at a time, which can become a hot spot for very busy groups. The store enforces it: the append is a conditional write that succeeds only if the sequence is still the next one, so two servers that both believe they own the conversation cannot both win. Acking only after storage adds a few milliseconds and is what makes "sent" mean "will not be lost".',
+          'A per-conversation sequence gives one order every member agrees on, without a global clock. It needs one writer per conversation at a time, which can become a hot spot for very busy groups. The store enforces it: the append is a conditional write that succeeds only if the sequence is still the next one, so two servers that both believe they own the conversation cannot both win. Acking only after storage adds a few milliseconds and is what makes "sent" mean "will not be lost, short of losing the region".',
         nodes: ['messages', 'store'],
         travel: [['messages', 'store', 'append']],
         short: 'Order + store',
@@ -200,7 +200,7 @@ export const chatMessaging: Design = {
       {
         title: 'Mark every member’s inbox',
         narration:
-          'For each member, the service records in their inbox that the conversation has a new sequence. This small record is how any device later learns what it missed.',
+          'For each member, the sender included so that their other devices sync it too, the service records in their inbox that the conversation has a new sequence. This small record is how any device later learns what it missed.',
         tradeoff:
           'Writing one inbox entry per member is fan-out on write: cheap for small groups, heavy for groups of thousands. Capping group size keeps it predictable; very large channels would switch to members pulling from the conversation instead. The append and the fan-out are separate steps, so the append writes a pending fan-out marker in the same atomic write as the message, an outbox, and a sweeper finishes any fan-out that a crash interrupted.',
         nodes: ['messages', 'inbox'],
@@ -241,7 +241,7 @@ export const chatMessaging: Design = {
         narration:
           'The gateway writes the message down each recipient socket. The device stores it and acks the highest sequence it holds with no gap before it, which moves its cursor and lets the sender see delivered.',
         tradeoff:
-          'Pub/sub is fire and forget, so a message can be lost between the bus and the device. That is acceptable because the store and the inbox are the source of truth. A missed push in the middle shows up as a gap when the next message arrives; a missed last message leaves no gap, so an inbox entry still unacked after a few seconds sends the device a sync signal and it reads from its cursor.',
+          'Pub/sub is fire and forget, so a message can be lost between the bus and the device. That is acceptable because the store and the inbox are the source of truth. A missed push in the middle shows up as a gap when the next message arrives; a missed last message leaves no gap, so a delayed check, enqueued with each fan-out, compares the inbox with the device cursors a few seconds later, and an entry still unacked sends the device a sync signal and it reads from its cursor.',
         nodes: ['gateway', 'devices'],
         travel: [],
         short: 'Deliver',
@@ -257,7 +257,7 @@ export const chatMessaging: Design = {
       {
         title: 'Notify offline devices',
         narration:
-          'If an inbox entry is not acked within a few seconds, or the user has no live socket, a push notification is sent through the phone platform’s push service.',
+          'Each fan-out enqueues a delayed check. A few seconds later a worker compares the inbox with the device cursors, and if an entry is still unacked, or the user has no live socket, a push notification is sent through the phone platform’s push service.',
         tradeoff:
           'Waiting a moment avoids notifying a phone that is about to receive the message over its socket. Platform push is best effort and rate limited, so it only wakes the app; the message itself always comes from our own sync.',
         nodes: ['inbox', 'push'],
@@ -335,7 +335,7 @@ export const chatMessaging: Design = {
           errorRate: '0.05%',
           healthy: '400 / 500',
         },
-        load: { lb: 40, gateway: 65, presence: 40, inbox: 45, store: 50 },
+        load: { lb: 40, gateway: 70, presence: 40, inbox: 45, store: 50 },
       },
     ],
   },
@@ -375,7 +375,7 @@ export const chatMessaging: Design = {
         {
           from: 'gw',
           to: 'redis',
-          label: 'SUBSCRIBE user:alice',
+          label: 'SSUBSCRIBE user:alice',
           note: 'From now on, anything published on Alice’s channel reaches this gateway, wherever the sender is.',
         },
         {
@@ -418,25 +418,25 @@ export const chatMessaging: Design = {
           from: 'gw',
           to: 'msg',
           label: 'forward',
-          note: 'The gateway decides nothing; it hands the message to the stateless service that owns ordering.',
+          note: 'The gateway applies rate limits and the size cap and decides nothing else about a message; it hands it to the stateless service that owns ordering.',
         },
         {
           from: 'msg',
           to: 'msg',
           label: 'member? next seq = 42',
-          note: 'The service checks that Alice is a member of the conversation and takes the next sequence number.',
+          note: 'The service checks that Alice is a member of the conversation and takes the next sequence number after the conversation counter, which is at 41.',
         },
         {
           from: 'msg',
           to: 'db',
           label: 'TransactWriteItems',
-          note: 'One transaction writes the message only if sequence 42 does not exist yet, the unique client message ID, and a pending fan-out marker. All three or none.',
+          note: 'One transaction moves the conversation counter to 42 only if it is still 41 in the current epoch, writes the message only if sequence 42 does not exist yet, the unique client message ID, and a pending fan-out marker. All four or none. The counter check prevents a gap, and the check on 42 a repeat.',
         },
         {
           from: 'db',
           to: 'msg',
-          label: 'committed in 3 zones',
-          note: 'The write is durable. If two servers raced for 42, only one transaction committed; the other rereads and retries as 43.',
+          label: 'committed on a quorum',
+          note: 'The write is durable on a quorum of the partition’s replicas, which are spread over zones. If two servers raced for 42, only one transaction committed; the other rereads and retries as 43.',
           style: 'reply',
         },
         {
@@ -473,8 +473,8 @@ export const chatMessaging: Design = {
         {
           from: 'msg',
           to: 'redis',
-          label: 'PUBLISH user:bob',
-          note: 'The service publishes on Bob’s channel without knowing which gateway holds his socket.',
+          label: 'SPUBLISH user:bob',
+          note: 'The service publishes on Bob’s channel without knowing which gateway holds his socket. It also enqueues the delayed check that later looks for unacked inbox entries.',
           style: 'async',
         },
         {
@@ -528,7 +528,7 @@ export const chatMessaging: Design = {
           from: 'fn',
           to: 'db',
           label: 'query pending markers',
-          note: 'Pending markers sit in a sparse index, so the query reads only unfinished fan-outs, older than a few seconds.',
+          note: 'Pending markers sit in a sparse index keyed by a bucket number, so index writes spread over many partitions. The sweeper queries each bucket and reads only unfinished fan-outs, older than a few seconds.',
         },
         {
           from: 'db',
@@ -546,7 +546,7 @@ export const chatMessaging: Design = {
         {
           from: 'fn',
           to: 'redis',
-          label: 'PUBLISH again',
+          label: 'SPUBLISH again',
           note: 'Devices that already hold 42 drop the repeat by sequence; the rest receive it now.',
           style: 'async',
         },
@@ -563,7 +563,7 @@ export const chatMessaging: Design = {
       title: 'Notify an offline phone',
       kind: 'queue',
       summary:
-        'Bob’s phone has no socket, or did not ack within a few seconds. A queue and a worker send a push that only wakes the app.',
+        'Bob’s phone has no socket, or did not ack within a few seconds. A delayed message on a queue and a worker find that out and send a push that only wakes the app.',
       runsOn: 'Message service → SQS → push worker on ECS → APNs or FCM',
       participants: [
         { id: 'msg', label: 'Message service', service: 'ECS Fargate' },
@@ -576,15 +576,15 @@ export const chatMessaging: Design = {
         {
           from: 'msg',
           to: 'sqs',
-          label: 'inbox unacked after N s',
-          note: 'Waiting a moment avoids notifying a phone that was about to receive the message over its socket.',
+          label: 'delayed check, N s',
+          note: 'Each fan-out enqueues one message with a delay of a few seconds. Waiting a moment avoids notifying a phone that was about to receive the message over its socket.',
           style: 'async',
         },
         {
           from: 'sqs',
           to: 'worker',
           label: 'poll',
-          note: 'The queue absorbs bursts and retries, so slow or rate-limited platform calls never block sending.',
+          note: 'The worker compares each member’s inbox entry with their device cursors. A device with a socket that is behind gets a sync signal on its channel; a member with no socket gets a push. The queue absorbs bursts and retries, so slow platform calls never block sending.',
         },
         {
           from: 'worker',
@@ -697,7 +697,7 @@ export const chatMessaging: Design = {
       title: 'Typing indicator',
       kind: 'direct',
       summary:
-        'Typing is a hint that is stale in seconds, so it skips the message service and is never stored.',
+        'Typing is a hint that is stale in seconds, so it skips the message service and is never stored. The gateway only reuses a member list the service already checked.',
       runsOn: 'Gateway → Redis → the other gateway, no store',
       participants: [
         { id: 'alice', label: 'Alice’s phone', service: 'App' },
@@ -717,8 +717,8 @@ export const chatMessaging: Design = {
         {
           from: 'gw1',
           to: 'redis',
-          label: 'PUBLISH user:bob',
-          note: 'No sequence, no store, no inbox. Under load these are the first events dropped.',
+          label: 'SPUBLISH user:bob',
+          note: 'The gateway publishes to the member list it cached, checked by the message service, when Alice opened the conversation. No sequence, no store, no inbox. Under load these are the first events dropped.',
           style: 'async',
         },
         {
@@ -856,7 +856,7 @@ export const chatMessaging: Design = {
         },
       ],
       choice:
-        'A pub/sub channel per user. It decouples senders from gateways, and since storage is the source of truth, a lost publish only delays a message until its unacked inbox entry triggers a sync, a few seconds later.',
+        'A pub/sub channel per user. It decouples senders from gateways, and since storage is the source of truth, a lost publish only delays a message until the delayed check finds its inbox entry unacked and triggers a sync, a few seconds later.',
     },
     {
       question: 'How do we keep messages in order?',
@@ -878,7 +878,7 @@ export const chatMessaging: Design = {
         },
       ],
       choice:
-        'Per-conversation sequence numbers, assigned by the service that owns the conversation’s partition and enforced by a conditional write on the next sequence. Gap detection is what makes reconnect sync reliable.',
+        'Per-conversation sequence numbers, assigned by the service that owns the conversation’s partition and enforced by a conditional write on the conversation’s counter and on the next sequence. Gap detection is what makes reconnect sync reliable.',
     },
     {
       question: 'How do we show delivered and read?',
@@ -917,7 +917,7 @@ export const chatMessaging: Design = {
         },
       ],
       choice:
-        'Events. An edit or a delete is a new entry with its own sequence that points at the message it changes; devices apply it when they sync, and the original text is purged from the store. Retention works the same way: a background job removes messages older than the conversation’s window and leaves a tombstone, so a device that syncs later knows the gap is intentional.',
+        'Events. An edit or a delete is a new entry with its own sequence that points at the message it changes; devices apply it when they sync, and the original text is purged from the store. Retention needs no tombstones: every message carries an expiry time and the store deletes it in the background some time after, while the conversation keeps a "retained from sequence N" watermark that a small job advances. History reads are clipped to the watermark, so a device that syncs later knows the gap is intentional.',
     },
     {
       question: 'What would we run each part on?',
@@ -930,7 +930,7 @@ export const chatMessaging: Design = {
         {
           name: 'Key-value store with conditional writes, DynamoDB style',
           pros: 'A conditional put on the next sequence is native; conversation as partition key and sequence as sort key.',
-          cons: 'One partition caps a conversation near a thousand writes a second, and fan-out writes drive the bill.',
+          cons: 'One partition caps a conversation at a few hundred appends a second, because transactional writes cost double, and transactional and fan-out writes drive the bill.',
         },
         {
           name: 'Sharded relational database',
@@ -961,7 +961,7 @@ export const chatMessaging: Design = {
         },
       ],
       choice:
-        'Ephemeral events over the same per-user channels. A typing event carries the conversation, expires after a few seconds and is sent at most once every few seconds per conversation; it skips the message service and the store. Online status is read on demand for the conversation on screen and refreshed while it stays open, instead of being pushed to every contact.',
+        'Ephemeral events over the same per-user channels. A typing event carries the conversation, expires after a few seconds and is sent at most once every few seconds per conversation; it skips the message service and the store, and the gateway publishes to the member list it cached, checked by the message service, when the conversation was opened. Online status is read on demand for the conversation on screen and refreshed while it stays open, instead of being pushed to every contact.',
     },
     {
       question: 'What happens when someone joins or leaves a group?',
@@ -1060,7 +1060,7 @@ export const chatMessaging: Design = {
     },
   ],
   wrapUp:
-    'WebSockets to stateful gateways, a per-conversation sequence written durably before the ack, inbox entries plus a pub/sub channel per user for fan-out, push notifications for offline phones, and cursor-based catch-up so a lost push or a dead server never loses a message.',
+    'WebSockets to stateful gateways, a per-conversation sequence written durably before the ack, inbox entries plus a pub/sub channel per user for fan-out, push notifications for offline phones, and cursor-based catch-up so a lost push or a dead server never loses a message acknowledged as sent, short of losing the region.',
   guarantees: {
     provides: [
       {
@@ -1071,7 +1071,7 @@ export const chatMessaging: Design = {
       {
         property: 'Ordering',
         promise:
-          'One total order per conversation, the same for every member and device. Sequence numbers have no gaps and no repeats because the append is a conditional write on the next sequence, checked by the store, not by whichever server believes it owns the conversation.',
+          'One total order per conversation, the same for every member and device. Sequence numbers have no gaps and no repeats because the append is conditional on the conversation’s counter, which prevents a gap, and on the next sequence not existing yet, which prevents a repeat, both checked by the store, not by whichever server believes it owns the conversation.',
       },
       {
         property: 'Send',
@@ -1096,7 +1096,7 @@ export const chatMessaging: Design = {
     ],
     assumes: [
       'The message store offers quorum replication and conditional writes that are atomic within one conversation’s partition.',
-      'Fan-out is redriven: the append writes a pending marker in the same atomic write as the message, and a sweeper repeats inbox marks and publishes until they are confirmed. Inbox marks keep the highest sequence, so repeats are harmless.',
+      'Fan-out is redriven: the append writes a pending marker in the same atomic write as the message, and a sweeper repeats the inbox marks until they are written and publishes again. A publish is never confirmed; the inbox is what a device syncs from. Inbox marks keep the highest sequence, so repeats are harmless.',
       'A device stores a message durably before acking it, and keeps a pending message with its client message ID across app restarts until it is acked.',
       'Client message IDs are random and large enough not to collide within a conversation.',
       'Membership changes take a sequence number in the conversation like any message, so who should receive a given message is well defined.',
@@ -1129,9 +1129,9 @@ export const chatMessaging: Design = {
       impact:
         'The sender has an ack and the message is durable, but no recipient learns of it. Online members see nothing, and offline members get no notification.',
       detection:
-        'The age of the oldest pending fan-out marker, alarmed above a few seconds, and a count of markers redriven by the sweeper.',
+        'The age of the oldest pending fan-out marker, alarmed above 10 s, and a count of markers redriven by the sweeper.',
       recovery:
-        'The sweeper reads the message, marks every member’s inbox and publishes again, then clears the marker. A fan-out that was half done is repeated in full: inbox marks keep the highest sequence and devices drop repeats by sequence. Every member ends with the message once.',
+        'The sweeper reads the message, marks every member’s inbox and publishes again, then clears the marker. A fan-out that was half done is repeated in full: inbox marks keep the highest sequence and devices drop repeats by sequence, so every member ends with one copy.',
     },
     {
       scenario:
@@ -1148,9 +1148,9 @@ export const chatMessaging: Design = {
       impact:
         'An online device misses a message. If it is the latest in the conversation, no later sequence arrives to reveal the gap, so the device would stay behind until it reconnects.',
       detection:
-        'Inbox entries not acked within a few seconds, tracked as a count and an age; resubscribe events on gateways; gaps counted by devices.',
+        'Inbox entries found unacked by the delayed check, tracked as a count and an age; resubscribe events on gateways; gaps counted by devices.',
       recovery:
-        'The unacked timer sends the device a sync signal, over its socket if it has one and through platform push otherwise. After a pub/sub restart, gateways resubscribe and tell their devices to check their inboxes. The device reads from its cursor and ends at the latest sequence.',
+        'The delayed check, a queue message enqueued with each fan-out and repeated by the sweeper, finds the entry still unacked and sends the device a sync signal, on its channel if it has a socket and through platform push otherwise. After a pub/sub restart, gateways resubscribe and tell their devices to check their inboxes. The device reads from its cursor and ends at the latest sequence.',
     },
     {
       scenario: 'A phone is lost, or a device’s token is stolen.',
@@ -1183,7 +1183,7 @@ export const chatMessaging: Design = {
   capacity: {
     assumptions: [
       '300M daily users, 50M devices connected at peak, and each user sends about 20 messages a day.',
-      'A message goes to 4 other members on average across one-to-one chats and groups, and about 2.5 of their devices are online to receive it.',
+      'A message is fanned out to 4 members on average across one-to-one chats and groups, counting the sender, whose other devices need it too. About 2.5 of their devices are online to receive it: people in an active conversation are connected far more often than the 1 in 6 average of 50M out of 300M.',
       'A stored message is about 300 bytes with metadata. Media is uploaded straight to object storage with a signed URL, and the message carries only the reference.',
       'A gateway runs at about 100K sockets, at about 20 KB of memory each, and can hold about 150K. Gateways are spread evenly over five zones, so the ones left after a zone loss can take its users. Peak traffic is twice the daily average.',
     ],
@@ -1201,7 +1201,7 @@ export const chatMessaging: Design = {
       {
         label: 'Fan-out writes',
         value: '~560K inbox marks and publishes/s at peak',
-        math: '140K messages/s × 4 members = 560K/s, four times the write rate of the message store',
+        math: '140K messages/s × 4 members = 560K/s, four times the send rate',
       },
       {
         label: 'Gateways',
@@ -1221,19 +1221,19 @@ export const chatMessaging: Design = {
     ],
     implications: [
       'Connections, not requests, size the gateway tier: 500 machines that are mostly idle memory. That is why gateways do nothing but hold sockets, and ordering and storage live in a separate stateless service that can deploy without dropping them.',
-      'Each message is written once and fanned out four times, so the inbox store and pub/sub carry the highest rates in the system. An inbox mark must be a single cheap upsert of the latest sequence per user and conversation, never a copy of the message.',
+      'Each message is one append and four inbox marks and publishes, so the inbox store and pub/sub carry the highest request rates in the system. The append is not free either: it is a transaction of four items, and transactional writes cost double. An inbox mark must be a single cheap upsert of the latest sequence per user and conversation, never a copy of the message.',
       'A group of a few hundred turns one send into a few hundred marks, about a hundred times the average. That is acceptable only because group size is capped; past that size, members pull.',
       '50M sockets with a 30 s heartbeat would be about 1.7M presence writes a second if each were forwarded, so heartbeats stop at the gateway, which refreshes presence for its users in batches.',
       'Typing events can match or exceed message traffic, so they are throttled per conversation, never stored and dropped first under load.',
       'A reconnect wave differs by a factor of 60 between everyone at once and jitter over a minute. Client backoff with jitter and handshake rate limits on gateways are part of the capacity plan, not a nicety.',
-      'Two petabytes a year means a store partitioned by conversation with old messages on cheaper storage. Reads are by conversation and sequence range, so that key serves both catch-up and scrolling back.',
-      'One writer per conversation caps a single conversation at roughly a thousand appends a second on one partition, far above any human group. A hot conversation is handled by batching: the writer assigns a range of sequences in one conditional write. Broadcast-style channels move to the pull model instead.',
+      'Two petabytes a year means a store partitioned by conversation, with cold history moved to a cheaper table and messages past retention deleted. Reads are by conversation and sequence range, so that key serves both catch-up and scrolling back.',
+      'One writer per conversation caps a single conversation at a few hundred appends a second on one partition, because transactional writes cost double, still far above any human group. A hot conversation is handled by packing: the writer puts a run of consecutive messages into one item under the same condition, and since write units are charged by size, a few small messages cost what one did. Broadcast-style channels move to the pull model instead.',
     ],
   },
   infrastructure: {
     provider: 'AWS',
     intro:
-      'One concrete way to run this design on AWS in a single region with five Availability Zones. The zones in the walkthrough are Availability Zones; the services below are examples that fit, not the only option.',
+      'One concrete way to run this design on AWS in a single region with five Availability Zones. With one region the epoch in the append condition never changes; it starts to matter with the standby region in the deep dive. The zones in the walkthrough are Availability Zones; the services below are examples that fit, not the only option.',
     items: [
       {
         part: 'Load balancer',
@@ -1254,26 +1254,26 @@ export const chatMessaging: Design = {
         service: 'Amazon ECS on AWS Fargate',
         why: 'Stateless and deployed often; it scales on CPU without touching the sockets.',
         watch:
-          'ECS CPUUtilization and MemoryUtilization; custom: ack latency p99, send errors, duplicate client message ID hits.',
+          'ECS CPUUtilization and MemoryUtilization; custom: ack latency p99 and p99.9, send errors, duplicate client message ID hits.',
       },
       {
         part: 'Message store',
         service: 'Amazon DynamoDB: conversation as partition key, sequence as sort key',
-        why: 'A conditional put on the next sequence and the unique client message ID fit in one TransactWriteItems call, together with the pending fan-out marker.',
+        why: 'A conditional update of the conversation counter, a conditional put on the next sequence and the unique client message ID fit in one TransactWriteItems call, together with the pending fan-out marker.',
         watch:
-          'SuccessfulRequestLatency, TransactionConflict and ConditionalCheckFailedRequests (two writers), WriteThrottleEvents; Contributor Insights for hot conversations.',
+          'SuccessfulRequestLatency, TransactionConflict, WriteThrottleEvents; custom: transactions cancelled by a failed condition (two writers), since ConditionalCheckFailedRequests is documented for single-item writes; Contributor Insights for hot conversations.',
       },
       {
         part: 'Inboxes',
         service: 'Amazon DynamoDB: user as partition key, conversation as sort key',
-        why: 'An inbox mark is a single upsert of the latest sequence. Pending fan-out markers sit in a sparse index, so the sweeper reads only what is unfinished.',
+        why: 'An inbox mark is a single upsert of the latest sequence. Pending fan-out markers sit in a sparse index keyed by a bucket number, so index writes spread over partitions and the sweeper reads only what is unfinished.',
         watch:
-          'ConsumedWriteCapacityUnits, about four times the message table, and WriteThrottleEvents; custom: age of the oldest pending fan-out marker.',
+          'ConsumedWriteCapacityUnits, which follows four marks per send, and WriteThrottleEvents; custom: age of the oldest pending fan-out marker.',
       },
       {
         part: 'Fan-out sweeper',
         service: 'A small always-on Amazon ECS task',
-        why: 'Every few seconds it queries the sparse index of pending markers and redrives them. EventBridge schedules run at most once a minute, too coarse for a fan-out that should finish in seconds.',
+        why: 'Every few seconds it queries each bucket of the sparse index of pending markers and redrives them. EventBridge schedules run at most once a minute, too coarse for a fan-out that should finish in seconds.',
         watch:
           'ECS RunningTaskCount for the sweeper; custom: markers redriven per minute and the age of the oldest marker.',
       },
@@ -1287,7 +1287,7 @@ export const chatMessaging: Design = {
       {
         part: 'Push sender',
         service: 'Amazon SQS queue feeding a worker that calls APNs and FCM',
-        why: 'The queue absorbs bursts and retries without blocking the message path; Amazon SNS mobile push is the managed alternative.',
+        why: 'Each fan-out enqueues a message with a delay of a few seconds; the worker compares the inbox with device cursors and signals or notifies what is still unacked. The queue absorbs bursts and retries without blocking the message path; Amazon SNS mobile push is the managed alternative.',
         watch:
           'ApproximateAgeOfOldestMessage (late notifications), ApproximateNumberOfMessagesVisible, and the depth of the dead-letter queue.',
       },
@@ -1306,18 +1306,18 @@ export const chatMessaging: Design = {
       },
       {
         part: 'Old messages and observability',
-        service: 'DynamoDB Standard-IA table class, TTL, Amazon CloudWatch',
-        why: 'Cold history costs less, retention deletes itself with TTL, and alarms watch handshake rate, pending marker age and partition throttling.',
+        service: 'A second DynamoDB table on the Standard-IA table class, TTL, Amazon CloudWatch',
+        why: 'The table class is set per table, so a job moves cold history to a second table that costs less to store. TTL deletes items past retention in the background, not at an exact time, so readers go by the conversation’s retained-from watermark. Alarms watch handshake rate, pending marker age and partition throttling.',
         watch:
-          'A dashboard with the SLOs, the alarms below, and Cost Explorer, where DynamoDB fan-out writes and the gateway fleet dominate.',
+          'A dashboard with the SLOs, the alarms below, and Cost Explorer, where DynamoDB writes and the gateway fleet dominate.',
       },
     ],
     limits: [
-      'A DynamoDB partition takes about 1,000 writes a second, which is where the "roughly a thousand appends a second per conversation" ceiling comes from. Batching sequences into one write raises it for a hot conversation.',
-      'With client IP preservation turned off, a Network Load Balancer opens at most about 55K connections to each target IP and port. A gateway holding 100K sockets either keeps client IP preservation on or registers on two ports; watch the port allocation error metric.',
+      'A DynamoDB partition takes about 1,000 write units a second, and every item in a transaction costs double, which is where the "a few hundred appends a second per conversation" ceiling comes from. Packing several small messages into one item raises it for a hot conversation.',
+      'With client IP preservation turned off, a Network Load Balancer opens at most about 55K connections to each target IP and port. A gateway holds 100K sockets, 125K after a zone loss and up to 150K, so it either keeps client IP preservation on or registers on three ports, 165K, which covers the ceiling; watch the port allocation error metric.',
       'AWS WAF does not attach to a Network Load Balancer, so per-user rate limits and handshake limits live in the gateways, with AWS Shield covering network-level floods.',
-      'TransactWriteItems handles up to 100 items, so the message, its unique client message ID and the pending marker go in one transaction, while the per-member inbox marks happen after it.',
-      'A region with only three Availability Zones turns a zone loss into a third of the fleet: 50M ÷ 333 is right at the 150K ceiling. Use a region with five or more zones, or run more gateways.',
+      'TransactWriteItems handles up to 100 items, so the conversation counter, the message, its unique client message ID and the pending marker go in one transaction, while the per-member inbox marks happen after it.',
+      'A region with only three Availability Zones turns a zone loss into a third of the fleet: 50M ÷ 333 is right at the 150K ceiling. Run more gateways, or use a region with five or more zones.',
     ],
   },
   slos: [
@@ -1364,7 +1364,7 @@ export const chatMessaging: Design = {
     },
     {
       name: 'Slow or failing sends',
-      metric: 'Custom: ack latency p99 above 1 s, or send errors above 0.1%',
+      metric: 'Custom: ack latency p99.9 above 1 s, or send errors above 0.1%',
       meaning:
         'The only path users wait on is in trouble: the store, the message service or a hot partition.',
     },
@@ -1383,7 +1383,7 @@ export const chatMessaging: Design = {
       name: 'Hot partition',
       metric: 'DynamoDB WriteThrottleEvents above zero for 5 minutes',
       meaning:
-        'A conversation or the inbox table hit a partition limit; batch sequences or check Contributor Insights.',
+        'A conversation or the inbox table hit a partition limit; pack messages into fewer items or check Contributor Insights.',
     },
     {
       name: 'Late notifications',
@@ -1394,7 +1394,7 @@ export const chatMessaging: Design = {
       name: 'Port limit',
       metric: 'NLB PortAllocationErrorCount above zero',
       meaning:
-        'A gateway hit the 55K connection limit per target IP and port; register it on another port.',
+        'A gateway hit the 55K connection limit per target IP and port; keep client IP preservation on or register it on three ports.',
     },
   ],
   evolution: {
@@ -1402,10 +1402,10 @@ export const chatMessaging: Design = {
     atScale: [
       'At 10x, deploys hurt first: every release of message logic drops every socket. Split thin gateways from a stateless message service, and add the per-user pub/sub channel so the service does not track gateways.',
       'At 10x, the reconnect query over all of a user’s conversations gets expensive. Materialize it as the inbox, written at send time.',
-      'At 10x, abuse shows up: add per-user send rate limits, a size cap per message and spam scoring at the gateway, before the message service does any work.',
+      'At 10x, abuse shows up: add per-user send rate limits and a size cap per message at the gateway, before the message service does any work. Spam scoring stays out of scope; if it is added later, it sits behind the message service.',
       'At 100x, one database cannot take the writes. Move messages to a store partitioned by conversation with conditional appends, shard pub/sub by user, and batch presence updates per gateway.',
       'At 100x, failures are routine: add jittered reconnects, handshake rate limits, the fan-out sweeper, and spare gateway capacity for one zone.',
-      'Across regions, devices connect to the nearest gateways, and each conversation is sequenced in one home region with an asynchronous standby, so order still comes from a single conditional write and a region loss costs minutes of sends, not history.',
+      'Across regions, devices connect to the nearest gateways, and each conversation is sequenced in one home region with an asynchronous standby, so order still comes from a single conditional write and a region loss costs minutes of sends and, until the region returns, the messages acked in its last seconds.',
     ],
     firstBottleneck:
       'Fan-out, in the inbox store. Sockets scale by adding gateways and appends scale by adding partitions, but every message becomes one write per member, so this path runs at several times the send rate and takes the full weight of large groups. It shows first as a growing age of pending fan-out markers and late notifications, while sends still look healthy.',
@@ -1413,7 +1413,7 @@ export const chatMessaging: Design = {
       'A durable ordered log per user between the message service and the gateways. The store and the cursors already make delivery reliable, so the bus can stay lossy and cheap. It is worth adding if repairs by sync become a visible share of traffic.',
       'Consensus across regions for sequencing. A home region per conversation keeps one writer and a simple conditional write; multi-region writes are worth it only if a region outage must not pause sends.',
       'Channels with many thousands of members in the first version. They need the pull model in the deep dive above, a second fan-out path to build and test; add it when the product needs broadcast-style groups.',
-      'Per-member read receipts in large groups. They multiply writes by group size again; an aggregate count is enough until users ask for names.',
+      'A receipt row per member per message. It multiplies writes by group size again; cursors per member give the same status, with counts in large groups and names on request.',
       'Pinning users to gateways by hashing. It removes the pub/sub layer but ties rebalancing to user identity; it pays off only if the subscription count becomes the limit.',
     ],
   },
