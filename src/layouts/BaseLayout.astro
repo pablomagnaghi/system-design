@@ -4,11 +4,14 @@ import '../styles/global.css';
 interface Props {
   title?: string;
   description?: string;
+  /** Narrower max width for the header and footer, so they line up with a narrow page column. */
+  width?: string;
 }
 
 const site = 'System Design, Step by Step';
 const {
   title,
+  width,
   description = 'An interactive system design library: how production systems are designed, scaled, operated and evolved, with trade-offs, guarantees, failure scenarios and capacity math.',
 } = Astro.props;
 const pageTitle = title ? `${title} · ${site}` : site;
@@ -33,7 +36,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
   </head>
   <body>
     <header class="site-header">
-      <div class="container nav">
+      <div class="container nav" style={width && `max-width: ${width}`}>
         <a href="/" class="brand">
           <span class="long">System Design, Step by Step</span>
           <span class="short">System Design</span>
@@ -52,7 +55,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
       <slot />
     </main>
     <footer class="site-footer">
-      <div class="container">
+      <div class="container" style={width && `max-width: ${width}`}>
         <span>
           © {new Date().getFullYear()} <a href="https://pablomagnaghi.com">Pablo Magnaghi</a>
         </span>
