@@ -14,7 +14,7 @@ export const distributedCache: Design = {
       'Keep cached data close to the database: changes show up quickly.',
     ],
     nonFunctional: [
-      'Cache hits in about a millisecond, and a few milliseconds at the 95th percentile with misses included, at tens of thousands of reads per second.',
+      'Cache hits in about a millisecond and a few milliseconds at the 95th percentile with misses included, at tens of thousands of reads per second. The 4% of reads that load from the database take tens of milliseconds.',
       'Scale out by adding nodes, moving as few keys as possible.',
       'Stay available when a node fails, and never let a miss storm take the database down.',
       'Bounded staleness: seconds in the normal case, and never longer than the TTL of an entry plus the few seconds of the local cache.',
@@ -59,7 +59,7 @@ export const distributedCache: Design = {
   highLevel: {
     label: 'Run a read through the cache',
     intro:
-      'Start with every read hitting the database, then watch the cache layers join one by one: a local cache, a sharded cluster, a single-flight loader and a change stream. Numbers are illustrative. Press play, or step through the stages.',
+      'Start with every read hitting the database, then watch the cache layers join one by one: a local cache, a sharded cluster, a single-flight loader and a change stream. The diagram draws three of the four shards. Numbers are illustrative. Press play, or step through the stages.',
     nodes: [
       {
         id: 'local',
@@ -105,7 +105,7 @@ export const distributedCache: Design = {
       {
         id: 'loader',
         title: 'Single flight',
-        detail: 'One load per key',
+        detail: 'About one load per key',
         column: 3,
         row: 'middle',
         appearsAt: 4,
@@ -192,7 +192,7 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '5 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { shardA: 30, shardB: 35, shardC: 30, db: 20 },
       },
@@ -213,7 +213,7 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '2 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { shardA: 30, shardB: 35, shardC: 30, db: 15 },
       },
@@ -222,7 +222,7 @@ export const distributedCache: Design = {
         narration:
           'On a miss, requests for the same key are coalesced: one of them takes a short lock and loads from the database, and the others wait for its result.',
         tradeoff:
-          'Without coalescing, a popular key expiring sends thousands of identical queries to the database at once. A per-key lock adds a little latency for the waiters, and turns a stampede into a single query.',
+          'Without coalescing, a popular key expiring sends thousands of identical queries to the database at once. A per-key lock adds a little latency for the waiters, and turns a stampede into about one query: the lock expires on its own, so a slow loader can overlap with a second one.',
         nodes: ['shardB', 'loader'],
         travel: [['shardB', 'loader']],
         short: 'Single flight',
@@ -231,7 +231,7 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '4 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { shardB: 45, loader: 30, db: 20 },
       },
@@ -249,7 +249,7 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '4 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { loader: 30, db: 25 },
       },
@@ -270,7 +270,7 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '4 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { app: 35, db: 30, shardB: 35 },
       },
@@ -291,7 +291,7 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '4 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { db: 30, changes: 25, shardC: 30 },
       },
@@ -309,26 +309,26 @@ export const distributedCache: Design = {
           requestsPerSecond: '50K',
           p95Latency: '5 ms',
           errorRate: '0.1%',
-          healthy: '3 / 3',
+          healthy: '4 / 4',
         },
         load: { shardA: 85, shardB: 92, shardC: 80 },
       },
       {
         title: 'When a shard dies',
         narration:
-          'If a primary fails, its replica is promoted. If the whole shard is lost, its keys move to the neighbors on the ring and start cold, while single-flight loads bound the work per key and a cap on concurrent loads bounds the total, so the database is not flooded. A node that comes back always rejoins empty, because its old entries missed every delete sent while it was away.',
+          'If a primary fails, its replica is promoted. If the whole shard is lost, its keys move to the neighbors on the ring and start cold. Single flight collapses the reads of a hot key into about one load, and a cap on concurrent loads lets about 4K loads a second through. Reads over the cap fail fast, so the database is not flooded. A node that comes back always rejoins empty, because its old entries missed every delete sent while it was away.',
         tradeoff:
-          'Replicas double the memory bill in exchange for fast failover. Without them, losing a node is still safe, but the database absorbs a burst of misses until the keys warm up again.',
+          'Replicas double the memory bill in exchange for fast failover. Without them, losing a node still loses no data, but its reads miss: the database takes loads up to the cap and the rest fail fast until the keys warm up again.',
         nodes: ['ring', 'shardA', 'shardC', 'loader'],
         travel: [],
         short: 'Shard dies',
         metrics: {
           users: '1M',
           requestsPerSecond: '50K',
-          p95Latency: '20 ms',
-          errorRate: '0.4%',
-          healthy: '2 / 3',
-          alerts: ['healthy'],
+          p95Latency: '30 ms',
+          errorRate: '5%',
+          healthy: '3 / 4',
+          alerts: ['p95Latency', 'errorRate', 'healthy'],
         },
         load: { shardA: 70, shardC: 75, loader: 50, db: 55 },
         traffic: [
@@ -417,8 +417,8 @@ export const distributedCache: Design = {
         {
           from: 'app',
           to: 'shard',
-          label: 'SET lock:item:42 NX PX 2000',
-          note: 'Only one request gets the load lock for this key. It expires on its own, so a crashed loader cannot block the key forever.',
+          label: 'SET lock:{item:42} NX PX 2000',
+          note: 'Only one request gets the load lock for this key. It expires on its own, so a crashed loader cannot block the key forever. The braces are a hash tag: the lock hashes on item:42, so it lands in the same slot and shard as the entry.',
         },
         {
           from: 'other',
@@ -435,14 +435,14 @@ export const distributedCache: Design = {
         {
           from: 'app',
           to: 'shard',
-          label: 'versioned SET, TTL 10 min ± jitter',
-          note: 'A script on the shard stores the value only if its version is not older than what is stored. Jitter keeps keys filled together from expiring together.',
+          label: 'versioned SET, TTL 1 min ± jitter',
+          note: 'A script on the shard stores the value only if its version is not older than what is stored. The item carries a price, so it gets the one-minute TTL of that family. Jitter keeps keys filled together from expiring together.',
         },
         {
           from: 'shard',
           to: 'other',
           label: 'value, v7',
-          note: 'The waiting requests now hit. One database query served a thousand readers.',
+          note: 'The waiting requests now hit. About one database query served a thousand readers: only a loader slower than the 2 seconds of the lock lets a second one through.',
           style: 'reply',
         },
       ],
@@ -477,7 +477,7 @@ export const distributedCache: Design = {
           from: 'app',
           to: 'shard',
           label: 'delete → tombstone v8',
-          note: 'Deleting instead of updating removes the race between two writers. For versioned keys the delete leaves a short-lived tombstone with version 8.',
+          note: 'Deleting instead of updating removes the race between two writers. For versioned keys the delete leaves a short-lived tombstone with version 8. The shard keeps the highest version it has seen, so a late delete for an older version changes nothing.',
         },
         {
           from: 'app',
@@ -529,7 +529,7 @@ export const distributedCache: Design = {
           from: 'shard',
           to: 'shard',
           label: 'cache 100, database 120',
-          note: 'Every reader now gets the wrong price for the whole TTL, ten minutes. This is the race that delete on write removes.',
+          note: 'Every reader now gets the wrong price for the whole TTL, one minute for a price. This is the race that delete on write removes.',
         },
       ],
     },
@@ -626,7 +626,7 @@ export const distributedCache: Design = {
           from: 'inv',
           to: 'shard',
           label: 'delete → tombstone v9',
-          note: 'The same delete the application would have sent. Repeating it for the same version changes nothing.',
+          note: 'The same delete the application would have sent. Repeating it for the same version changes nothing, and one for an older version is ignored.',
         },
         {
           from: 'inv',
@@ -641,7 +641,7 @@ export const distributedCache: Design = {
       title: 'A late fill is rejected',
       kind: 'sync',
       summary:
-        'A slow reader loaded version 7 just before a write. Its fill arrives after the delete and would cache the old price for ten minutes.',
+        'A slow reader loaded version 7 just before a write. Its fill arrives after the delete and would cache the old price for a full TTL, one minute.',
       runsOn: 'Two app servers → Aurora → ElastiCache script comparing versions',
       participants: [
         { id: 'reader', label: 'Slow reader', service: 'ECS' },
@@ -689,19 +689,20 @@ export const distributedCache: Design = {
       kind: 'async',
       summary:
         'The primary of one shard dies. Its replica in another zone takes over, and the deletes that did not replicate are replayed.',
-      runsOn: 'ElastiCache Multi-AZ failover → client slot map refresh → invalidator replay',
+      runsOn:
+        'ElastiCache Multi-AZ failover → client slot map refresh → replayer for the affected slots',
       participants: [
         { id: 'app', label: 'App server', service: 'ECS' },
         { id: 'primary', label: 'Primary', service: 'ElastiCache, zone a' },
         { id: 'replica', label: 'Replica', service: 'ElastiCache, zone b' },
-        { id: 'inv', label: 'Invalidator', service: 'ECS' },
+        { id: 'inv', label: 'Replayer', service: 'ECS' },
       ],
       steps: [
         {
           from: 'app',
           to: 'primary',
           label: 'GET → timeout',
-          note: 'A timeout is treated as a miss, so the read is slower, not wrong. The load lock and the cap on concurrent loads protect the database.',
+          note: 'A timeout is treated as a miss, so the read is slower, not wrong. The lock lives on the shard that is down, so in-process single flight and the cap on concurrent loads are what protect the database here.',
         },
         {
           from: 'replica',
@@ -719,7 +720,7 @@ export const distributedCache: Design = {
           from: 'inv',
           to: 'replica',
           label: 'replay recent deletes',
-          note: 'A delete that did not replicate would let an old value come back. The invalidator rewinds past the replication gap and replays; deletes are idempotent.',
+          note: 'A delete that did not replicate would let an old value come back. A replayer reads the change topic again from before the replication gap and sends the deletes for keys in the slots of that shard, while the main consumer keeps its position. Deletes are idempotent.',
         },
       ],
     },
@@ -767,7 +768,7 @@ export const distributedCache: Design = {
         },
       ],
       choice:
-        'A short-lived local cache for keys detected as hot, and copies across shards only for the rare key that still overloads one node. Detection runs in each client: it samples its reads into a small top-K counter over a sliding window of a few seconds, and a key above a share of that server’s reads, around 1%, is promoted to the local cache until it cools down. The hot shard alarm, one shard’s CPU far above the others, is the server-side signal that detection is missing something.',
+        'A short-lived local cache for keys detected as hot, and copies across shards only for the rare key that still overloads one node. Detection runs in each client: it samples its reads into a small top-K counter over a sliding window of a few seconds, with K around 1,000, and the keys in that top K are promoted to the local cache until they cool down. The hot shard alarm, one shard’s CPU far above the others, is the server-side signal that detection is missing something.',
     },
     {
       question: 'How do we avoid caching a stale value after a delete?',
@@ -894,7 +895,7 @@ export const distributedCache: Design = {
         },
       ],
       choice:
-        'Preload, then shift traffic in steps. The hot key lists that clients already keep give the keys to load; a loader fills them from the database under the same cap on concurrent loads. Then traffic moves to the new cluster in steps, 1%, 10%, 50%, 100%, and each step waits until the new cluster’s hit ratio is close to the old one’s.',
+        'Preload, then shift traffic in steps. The keys to load are sampled from the old cluster with SCAN, not taken from the clients’ hot lists, which only name keys the servers already answer locally. A loader fills them from the database under the same cap on concurrent loads. With no old cluster to sample, the stepped shift and the cap are what is left. Then traffic moves to the new cluster in steps, 1%, 10%, 50%, 100%, and each step waits until the new cluster’s hit ratio is close to the old one’s.',
     },
     {
       question: 'What about several regions?',
@@ -916,7 +917,7 @@ export const distributedCache: Design = {
         },
       ],
       choice:
-        'A cluster per region. Each region fills from its local database copy, and invalidations, not values, cross regions: each region runs its own change stream consumer on the replicated database log, so a delete follows the data that changed. A replica that lags means a fill can read an old row, which is what versioned fills and the TTL already bound.',
+        'A cluster per region. Each region fills from its local database copy, and invalidations, not values, cross regions: the change topic is replicated to every region and each region runs its own invalidator on its copy, because a read-only database copy may not offer a change log to read. A delete can arrive before the local database copy has the new row, so a fill can read an old row, which is what tombstones, versioned fills and the TTL already bound.',
     },
     {
       question: 'Which engine, and who runs it?',
@@ -975,17 +976,17 @@ export const distributedCache: Design = {
       {
         property: 'Invalidation delivery',
         promise:
-          'At least once, made harmless by the row version. The change stream consumer commits its position only after the delete succeeded, so a change is never skipped; a repeated delete or tombstone for the same version changes nothing.',
+          'At least once, made harmless by the row version. The change stream consumer commits its position only after the delete succeeded, so a change is not skipped while it is still within the retention of the stream; a repeated delete or tombstone for the same version changes nothing.',
       },
       {
         property: 'Fill ordering',
         promise:
-          'For keys with versioned values, the cached value never moves backwards. The shard accepts a fill only if its version is at least the version of the stored value or tombstone, compared and written in one atomic step on the node.',
+          'For keys with versioned values, the cached value never moves backwards. The shard accepts a fill only if its version is at least the version of the stored value or tombstone, compared and written in one atomic step on the node. A tombstone is written through the same comparison and keeps the highest version seen, so a late delete never lowers it.',
       },
       {
         property: 'Availability',
         promise:
-          'A cache failure makes reads slower, never wrong and never unavailable by itself. A timeout or a dead shard is treated as a miss, and the per-key load lock plus a cap on concurrent loads keeps the misses from overloading the database.',
+          'A cache failure makes reads slower, not wrong, except for the failover window listed below. A timeout or a dead shard is treated as a miss, and single flight plus a cap on concurrent loads keeps the misses from overloading the database. When a shard or the whole cluster is cold, that cap fails a share of the reads fast on purpose.',
       },
     ],
     assumes: [
@@ -997,9 +998,10 @@ export const distributedCache: Design = {
     ],
     doesNotGuarantee: [
       'Read-your-writes or linearizable reads. A flow that must see its own write reads the database.',
-      'Freshness through a failover. Replication is asynchronous, so a promoted replica can miss a recent delete or tombstone and serve the old value until its TTL or until the change stream is replayed.',
+      'Freshness through a failover. Replication is asynchronous, so a promoted replica can miss a recent delete or tombstone and serve the old value until its TTL or until the deletes for its slots are replayed.',
       'That the database commit and the cache delete happen together. They are two writes; the change stream is what repairs a delete that the application never sent.',
       'That an entry stays cached. Eviction, failover and resharding can drop any entry at any time.',
+      'That a tombstone survives memory pressure. It is an entry like any other: if it is evicted before the loader’s deadline, a late fill can land, and the entry TTL is the bound.',
       'Exactly one database load per key. The load lock expires, so a slow loader can overlap with a second one; versioned fills make the overlap harmless, and the lock is an optimization, not a correctness mechanism.',
     ],
   },
@@ -1007,20 +1009,20 @@ export const distributedCache: Design = {
     {
       scenario: 'A shard primary fails and its replica is promoted.',
       impact:
-        'Reads for that shard fail for the few seconds of the promotion and are treated as misses. Fills that were not replicated become extra misses. Deletes and tombstones that were not replicated are worse: the old value is back and is served as a hit.',
+        'Reads for that shard time out until the failure is detected, the replica is promoted and clients refresh the slot map; the promotion itself typically takes a few seconds on ElastiCache. Those reads are treated as misses. Fills that were not replicated become extra misses. Deletes and tombstones that were not replicated are worse: the old value is back and is served as a hit.',
       detection:
         'The failover event, the replication offset gap at promotion, and a sampled comparison of cached versions against the database that reports a stale-hit rate.',
       recovery:
-        'The invalidation consumer for that shard is rewound by more than the replication gap and replays its deletes, which is safe because they are idempotent. Anything still missed expires with its TTL. A new replica syncs from the new primary.',
+        'A replayer reads the change topic again from before the replication gap and sends the deletes for keys in the slots of that shard, which is safe because they are idempotent; the main consumer keeps its position. Anything still missed expires with its TTL. A new replica syncs from the new primary.',
     },
     {
       scenario: 'A whole shard is lost, and later comes back.',
       impact:
-        'A third of the keys move to the neighbors and start cold, so about a third of the reads miss at first and the database takes the burst. If the old node only lost its network and returns with its memory intact, it holds entries that missed every delete sent while it was away.',
+        'A quarter of the keys move to the neighbors and start cold, so about a quarter of the reads that reach the shards, 10K a second, miss at first. That is far more than the database is allowed to take, so part of those reads fail fast. If the old node only lost its network and returns with its memory intact, it holds entries that missed every delete sent while it was away.',
       detection:
-        'Healthy shards 2 / 3, a drop in hit ratio, a rise in database queries per second and in load-queue wait time.',
+        'Healthy shards 3 / 4, a drop in hit ratio, a rise in loads per second and in load-queue wait time.',
       recovery:
-        'Single flight keeps it to one load per key and the cap on concurrent loads bounds the total; hot keys are warm again within seconds, the long tail within minutes. A node always rejoins the ring empty: it is flushed first, then given its range back, which causes a second, smaller round of misses.',
+        'Single flight keeps it to about one load per key and the cap on concurrent loads holds the database at about 4K loads a second. Reads over the cap fail fast, about 5% of all reads in the first seconds. Hot keys are warm again within seconds, the long tail within minutes. A node always rejoins the ring empty: it is flushed first, then given its range back, which causes a second, smaller round of misses.',
     },
     {
       scenario: 'The application commits a write and crashes before deleting the cached key.',
@@ -1056,7 +1058,7 @@ export const distributedCache: Design = {
       detection:
         'Hit ratio near zero, the load queue at its cap, database connections and CPU saturated.',
       recovery:
-        'The cap on concurrent loads sheds the excess: those reads fail fast instead of piling up on the database. Traffic is shifted to the cold cluster in steps, or shards are restarted one at a time, so only a fraction of the keys is cold at any moment. The cluster ends warm with no repair needed.',
+        'The cap on concurrent loads lets about 4K loads a second through and sheds the rest: those reads fail fast instead of piling up on the database. Traffic is shifted to the cold cluster in steps, or shards are restarted one at a time, so only a fraction of the keys is cold at any moment. The cluster ends warm with no repair needed.',
     },
     {
       scenario:
@@ -1081,7 +1083,7 @@ export const distributedCache: Design = {
       {
         label: 'Reads reaching the shards',
         value: '~40K/s',
-        math: '50K/s × (1 − 0.20 served locally) = 40K/s, about 13K/s per shard. Far below what one node can serve.',
+        math: '50K/s × (1 − 0.20 served locally) = 40K/s, 10K/s per shard. Far below what one node can serve.',
       },
       {
         label: 'Database reads after the cache',
@@ -1095,26 +1097,26 @@ export const distributedCache: Design = {
       },
       {
         label: 'Memory',
-        value: '30 GB of data, about 78 GB provisioned',
-        math: '30M entries × 1 KB = 30 GB; ÷ 10 GB budget per node = 3 shards; × 2 for replicas = 6 nodes × 13 GB.',
+        value: '30 GB of data, about 104 GB provisioned',
+        math: '30M entries × 1 KB = 30 GB. 3 shards of 10 GB would run 100% full, past the 90% memory alarm, so 4 shards at 7.5 GB each, 75% full; × 2 for replicas = 8 nodes × 13 GB = 104 GB.',
       },
       {
         label: 'Keys moved when a shard is added',
-        value: '~25%, not ~75%',
-        math: 'Consistent hashing, 3 → 4 shards: 1/4 of 30M = 7.5M keys move. With hash mod N only the keys where h mod 3 = h mod 4 stay, 3 in 12, so 75% move.',
+        value: '~20%, not ~80%',
+        math: 'Consistent hashing, 4 → 5 shards: 1/5 of 30M = 6M keys move. With hash mod N only the keys where h mod 4 = h mod 5 stay, 4 in 20, so 80% move.',
       },
       {
         label: 'Misses when a shard is lost',
-        value: '~13K/s at first',
-        math: '40K/s ÷ 3 shards ≈ 13K reads/s start cold, on top of the usual 2K/s: about 30% of the load that used to overload the database, falling as keys warm up.',
+        value: '~10K/s at first',
+        math: '40K/s ÷ 4 shards = 10K reads/s start cold, on top of the usual 2K/s: 12K loads/s asked for, about a quarter of the load that used to overload the database. Single flight collapses repeated reads of hot keys to about 6.5K loads/s, the cap admits 4K and the other 2.5K fail fast, 5% of the 50K reads, falling as keys warm up.',
       },
     ],
     implications: [
-      'Memory sets the shard count, not throughput: each shard is asked for 13K operations a second and could serve several times that. Scaling out is driven by data size and hit ratio.',
-      'The database is sized for about 2K reads per second plus headroom, not for 50K. That makes the cache part of the capacity plan, so the stampede and cold-start protections are required, not optional.',
+      'Memory sets the shard count, not throughput: each shard is asked for 10K operations a second and could serve several times that. Scaling out is driven by data size and hit ratio.',
+      'The database is sized for about 2K loads per second with headroom up to 4K, which is where the cap on concurrent loads sits, not for 50K. That makes the cache part of the capacity plan, so the stampede and cold-start protections are required, not optional.',
       'Hit ratio is the number to watch. Going from 95% to 90% doubles the database reads, so eviction rate and hit ratio have alarms before latency does.',
-      'A lost shard is survivable (about 15K loads a second in the first moments), a lost cluster is not (40K). Hence replicas, one-at-a-time restarts and a cap on concurrent loads.',
-      'With 100 application servers, a local cache of 10K entries costs about 10 MB each and removes a fifth of the network calls. It is cheap, and it is also where the few seconds of extra staleness come from.',
+      'A lost shard costs about 5% of the reads for a short time (12K loads a second asked for, 4K admitted). A lost cluster fails most of them (40K asked for). Hence replicas, one-at-a-time restarts and a cap on concurrent loads.',
+      'With 100 application servers, a local cache of about 1,000 entries of 1 KB costs about 1 MB each and removes a fifth of the network calls. It is cheap, and it is also where the few seconds of extra staleness come from.',
     ],
   },
   infrastructure: {
@@ -1132,7 +1134,7 @@ export const distributedCache: Design = {
       {
         part: 'Cache shards',
         service:
-          'Amazon ElastiCache for Valkey or Redis OSS, cluster mode, 3 shards × 2 nodes, cache.r7g.large',
+          'Amazon ElastiCache for Valkey or Redis OSS, cluster mode, 4 shards × 2 nodes, cache.r7g.large',
         why: 'Cluster mode spreads 16,384 hash slots over the shards, the managed form of the ring, and reshards online by moving slots. Each shard has a replica in another zone.',
         watch:
           'CacheHitRate, Evictions, DatabaseMemoryUsagePercentage, EngineCPUUtilization, CurrConnections, NetworkBandwidthOutAllowanceExceeded.',
@@ -1148,14 +1150,14 @@ export const distributedCache: Design = {
         part: 'Single flight and versioned fills',
         service:
           'SET NX with an expiry for the load lock, and a Valkey script or function for the versioned SET',
-        why: 'Both run atomically on the shard that owns the key, so no extra lock service is needed.',
+        why: 'The lock key carries the entry’s key as a hash tag, lock:{item:42}, so both hash to the same slot and each command runs atomically on the shard that owns the key. No extra lock service is needed.',
         watch:
-          'Custom: load-queue wait time and loads in flight against the cap; fills rejected for an older version.',
+          'Custom: loads per second, load-queue wait time and loads in flight against the cap; fills rejected for an older version.',
       },
       {
         part: 'Database',
         service: 'Amazon Aurora PostgreSQL, a writer and read replicas',
-        why: 'The source of truth, sized for about 2K loads a second plus headroom. Each row carries a version column that only grows.',
+        why: 'The source of truth, sized for about 2K loads a second with headroom up to the 4K cap. Each row carries a version column that only grows.',
         watch:
           'CPUUtilization, DatabaseConnections, ReadIOPS, and AuroraReplicaLag if loaders read from replicas.',
       },
@@ -1169,7 +1171,7 @@ export const distributedCache: Design = {
       {
         part: 'Invalidator',
         service: 'A small consumer on Amazon ECS',
-        why: 'Deletes keys and writes tombstones, and commits its offset only after the delete succeeded.',
+        why: 'Deletes keys and writes tombstones, and commits its offset only after the delete succeeded. After a failover a second instance, the replayer, reads the topic again for the affected slots.',
         watch:
           'Custom: lag in seconds behind the latest commit, deletes that found the key still present, errors.',
       },
@@ -1192,14 +1194,15 @@ export const distributedCache: Design = {
       'One key lives in one hash slot on one shard, and a slot cannot be split. A single hot key is capped by one node, however many shards there are; that is what the local cache and key copies are for.',
       'Each cache node has a baseline network bandwidth and a burst allowance. Large values hit the bandwidth limit before CPU or memory; NetworkBandwidthOutAllowanceExceeded shows it.',
       'ElastiCache reserves part of each node’s memory for background work; on a 13 GB node about 10 GB is the data budget, which is what the capacity plan uses.',
-      'Replication is asynchronous, so a failover can lose the last writes, deletes included. The invalidator replays past that gap.',
+      'Replication is asynchronous, so a failover can lose the last writes, deletes included. A replayer reads the change topic again from before that gap for the affected slots.',
+      'Cluster mode does not hand the slots of a lost shard to its neighbors, as the generic ring in the walkthrough does. If every node of a shard fails, its slots have no owner until ElastiCache replaces the nodes, and the replacements start empty. The application treats reads for those slots as misses under the load cap.',
       'An Aurora logical replication slot keeps WAL until the connector reads it. A stalled connector fills the database’s storage, so its lag has an alarm.',
     ],
   },
   slos: [
     {
       objective: 'Read latency',
-      target: '99% of reads under 5 ms, hits and misses included',
+      target: '95% of reads under 5 ms and 99% under 50 ms, hits and misses included',
       measure:
         'Client-side latency of get, measured in the application, split by local hit, shared hit and miss.',
     },
@@ -1207,7 +1210,7 @@ export const distributedCache: Design = {
       objective: 'Hit ratio',
       target: 'Shared cache hit ratio at or above 95%',
       measure:
-        'ElastiCache CacheHitRate. Each point lost adds about 400 loads a second to the database.',
+        'The client’s own counter: reads that hit on their first GET, over reads that reach the shards. ElastiCache CacheHitRate is the cross-check and reads lower, because the repeated GETs of requests waiting on a load count as misses. Each point lost adds about 400 loads a second to the database.',
     },
     {
       objective: 'Freshness',
@@ -1219,13 +1222,14 @@ export const distributedCache: Design = {
       objective: 'Database protected',
       target: 'Database reads under 4K a second, twice the planned 2K',
       measure:
-        'Aurora read throughput against the load cap; above it, the cache is not doing its job.',
+        'The loaders’ own counter of loads per second, summed across servers, since each load is one known query. 4K is where the load cap sits: at the cap reads are being shed and the cache is not doing its job.',
     },
   ],
   alarms: [
     {
       name: 'Hit ratio falling',
-      metric: 'ElastiCache CacheHitRate below 93% for 10 minutes',
+      metric:
+        'Shared hit ratio from the client counter: below 95%, the SLO, warns; below 93% for 10 minutes pages',
       meaning:
         'The working set outgrew memory or a key family stopped caching; the database load is about to double.',
     },
@@ -1248,7 +1252,8 @@ export const distributedCache: Design = {
     },
     {
       name: 'Stale cache risk',
-      metric: 'Invalidator lag above 30 s, or the connector’s lag growing',
+      metric:
+        'Invalidator lag above 5 s, the SLO, warns; above 30 s, or the connector’s lag growing, pages',
       meaning:
         'Writes from other services are not being invalidated; stale reads last up to the TTL, and Aurora is holding WAL.',
     },
@@ -1268,8 +1273,9 @@ export const distributedCache: Design = {
   evolution: {
     mvp: 'One cache node with a replica, cache-aside with a TTL and delete on write in the application. No local cache, no ring, no change stream, no versions. This is enough while the data fits in one node, the application is the only writer and a stale read for one TTL is acceptable.',
     atScale: [
-      'At 10x (500K reads/s, about 300 GB): around 30 shards. The ring becomes shared configuration with a version, pushed to clients from a coordination service. Hot key detection and the local cache become necessary, and so does the change stream, because by now there are writers that do not know the cache.',
-      'Also at 10x: about 1,000 application servers each holding connections to 30 shards. A proxy tier or a sidecar starts to pay for itself by pooling connections and owning the ring.',
+      'Between the MVP and the design above (50K reads/s, 30 GB): the data outgrows one node, so shards and a shared slot map come first. Hot key detection and the local cache follow when one key saturates a shard, the change stream when a writer appears that does not know the cache, and versioned fills for the families where a stale read hurts.',
+      'At 10x (500K reads/s, about 300 GB): about 40 shards at the same 75% fill. Resharding stops being an event and becomes routine work, one slot range at a time.',
+      'Also at 10x: about 1,000 application servers each holding connections to 40 shards. A proxy tier or a sidecar starts to pay for itself by pooling connections and owning the slot map.',
       'At 100x (millions of reads per second, terabytes): memory is the main cost. Large or cold values move to a flash tier, values are compressed, and admission control keeps one-hit keys out. Each region gets its own cluster, and invalidations, not values, are sent across regions.',
       'At that size a cold cluster cannot be warmed by production traffic alone, so new clusters are warmed from a running one before they take reads.',
     ],
