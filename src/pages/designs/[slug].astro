@@ -3,6 +3,7 @@ import type { GetStaticPaths } from 'astro';
 import { designs, type Design } from '../../content';
 import Walkthrough from '../../components/Walkthrough';
 import BaseLayout from '../../layouts/BaseLayout.astro';
+import { relatedAfter } from '../../lib/related-designs';
 
 export const getStaticPaths = (() =>
   designs.map((design) => ({
@@ -15,7 +16,7 @@ interface Props {
 }
 
 const { design } = Astro.props;
-const others = designs.filter((other) => other.slug !== design.slug);
+const others = relatedAfter(designs, design.slug);
 ---
 
 <BaseLayout title={design.title} description={design.summary}>
@@ -283,11 +284,30 @@ const others = designs.filter((other) => other.slug !== design.slug);
       <p>{design.wrapUp}</p>
     </section>
 
-    <nav class="next" aria-label="Other designs">
-      {others.map((other) => (
-        <a href={`/designs/${other.slug}/`}>{other.title} →</a>
-      ))}
-    </nav>
+    <section class="more" aria-labelledby="more-title" data-carousel>
+      <div class="more-head">
+        <h2 id="more-title">More designs</h2>
+        <div class="more-controls">
+          <button type="button" class="more-button" data-prev aria-label="Previous designs">
+            ←
+          </button>
+          <button type="button" class="more-button" data-next aria-label="Next designs">
+            →
+          </button>
+        </div>
+      </div>
+      <ul class="more-track" data-track>
+        {others.map((other) => (
+          <li>
+            <a class="card more-card" href={`/designs/${other.slug}/`}>
+              <span class="more-badge">{other.difficulty}</span>
+              <span class="more-name">{other.title}</span>
+              <span class="more-summary">{other.summary}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </section>
   </article>
 </BaseLayout>
 
@@ -488,12 +508,237 @@ const others = designs.filter((other) => other.slug !== design.slug);
   .wrap-up p {
     font-size: 1.1rem;
   }
-  .next {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+  .more {
     margin-top: 56px;
     padding-top: 24px;
     border-top: 1px solid var(--border);
   }
+  .more-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .more-head h2 {
+    margin: 0;
+    font-size: 1.3rem;
+  }
+  .more-controls {
+    display: flex;
+    gap: 8px;
+  }
+  .more-button {
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 1.1rem;
+    cursor: pointer;
+  }
+  .more-button:hover,
+  .more-button:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .more-track {
+    list-style: none;
+    margin: 0;
+    padding: 4px 2px 12px;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: min(280px, 80%);
+    gap: 16px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+    overscroll-behavior-x: contain;
+  }
+  .more-track li {
+    scroll-snap-align: start;
+    display: flex;
+  }
+  .more-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    padding: 20px;
+    color: var(--text);
+  }
+  .more-card:hover,
+  .more-card:focus-visible {
+    text-decoration: none;
+    border-color: var(--accent);
+  }
+  .more-badge {
+    align-self: flex-start;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .more-name {
+    font-weight: 600;
+    font-size: 1.05rem;
+  }
+  .more-summary {
+    color: var(--text-muted);
+    font-size: 0.92rem;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  /* While drifting, snapping and smooth scrolling would fight the per-frame movement. */
+  .more-track.drifting {
+    scroll-snap-type: none;
+    scroll-behavior: auto;
+    scrollbar-width: none;
+  }
+  .more-track.drifting::-webkit-scrollbar {
+    display: none;
+  }
+  .more-track.drifting li {
+    will-change: transform, opacity;
+  }
+  .more-button {
+    transition:
+      transform 120ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+  }
+  .more-button:active {
+    transform: scale(0.92);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .more-track {
+      scroll-behavior: auto;
+    }
+  }
 </style>
+
+<script>
+  import { easeOutCubic, visibleFraction, wrapOffset } from '../../lib/related-designs';
+
+  // Pixels per second of the continuous drift: slow enough to read, fast enough to notice.
+  const SPEED = 45;
+  // How long the drift waits after someone scrolls, drags or presses an arrow.
+  const HOLD_MS = 4000;
+  // Duration of the glide an arrow press starts.
+  const GLIDE_MS = 420;
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-carousel]')) {
+    const track = root.querySelector<HTMLElement>('[data-track]');
+    if (!track) continue;
+    const prev = root.querySelector('[data-prev]');
+    const next = root.querySelector('[data-next]');
+    const page = () => track.clientWidth;
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      // Without motion the strip stays still and the arrows page through it.
+      prev?.addEventListener('click', () => track.scrollBy({ left: -page() }));
+      next?.addEventListener('click', () => track.scrollBy({ left: page() }));
+      continue;
+    }
+
+    // Render the cards twice so the strip loops forever. The copies are hidden from screen readers
+    // and from the tab order, so keyboard and assistive tech see each design once.
+    for (const item of [...track.children]) {
+      const copy = item.cloneNode(true) as HTMLElement;
+      copy.setAttribute('aria-hidden', 'true');
+      copy.querySelectorAll('a').forEach((link) => link.setAttribute('tabindex', '-1'));
+      track.append(copy);
+    }
+    track.classList.add('drifting');
+    const loop = () => track.scrollWidth / 2;
+    const items = [...track.children] as HTMLElement[];
+
+    // Cards entering or leaving the window shrink and fade with how much of them is visible, so the
+    // edge reads as motion instead of a hard cut.
+    const shapeCards = () => {
+      const view = track.getBoundingClientRect();
+      const boxes = items.map((item) => item.getBoundingClientRect());
+      items.forEach((item, i) => {
+        const box = boxes[i];
+        if (!box) return;
+        const shown = visibleFraction(box.left, box.right, view.left, view.right);
+        item.style.opacity = String(0.3 + 0.7 * shown);
+        item.style.transform = `scale(${0.9 + 0.1 * shown})`;
+      });
+    };
+
+    let position = track.scrollLeft;
+    let hovered = false;
+    let focused = false;
+    let visible = false;
+    let pausedUntil = 0;
+    const holdOff = () => (pausedUntil = Date.now() + HOLD_MS);
+    root.addEventListener('mouseenter', () => (hovered = true));
+    root.addEventListener('mouseleave', () => (hovered = false));
+    root.addEventListener('focusin', () => (focused = true));
+    root.addEventListener('focusout', () => (focused = false));
+    track.addEventListener('pointerdown', holdOff);
+    track.addEventListener('wheel', holdOff, { passive: true });
+    track.addEventListener('touchstart', holdOff, { passive: true });
+    new IntersectionObserver(([entry]) => (visible = entry?.isIntersecting ?? false)).observe(root);
+
+    // A manual scroll moves the strip; keep it inside one copy and let the drift resume from there.
+    track.addEventListener(
+      'scroll',
+      () => {
+        if (Math.abs(track.scrollLeft - position) < 2) return;
+        const wrapped = wrapOffset(track.scrollLeft, loop());
+        if (Math.abs(wrapped - track.scrollLeft) > 1 && Date.now() >= pausedUntil) {
+          track.scrollLeft = wrapped;
+        }
+        position = wrapped;
+      },
+      { passive: true },
+    );
+
+    // The arrows glide one visible page, starting on the same frame as the press. Near either end,
+    // jump to the matching spot in the other copy first, so there is always room to glide.
+    let glideFrame = 0;
+    const glide = (direction: 1 | -1) => {
+      holdOff();
+      cancelAnimationFrame(glideFrame);
+      let start = track.scrollLeft;
+      if (direction < 0 && start < page()) start += loop();
+      if (direction > 0 && start + 2 * page() > track.scrollWidth) start -= loop();
+      const distance = direction * page();
+      // Count one frame as already elapsed, so the press moves the strip on this very frame.
+      const began = performance.now() - 16;
+      const step = (now: number) => {
+        const progress = easeOutCubic((now - began) / GLIDE_MS);
+        position = start + distance * progress;
+        track.scrollLeft = position;
+        if (progress < 1) glideFrame = requestAnimationFrame(step);
+      };
+      step(performance.now());
+    };
+    prev?.addEventListener('click', () => glide(-1));
+    next?.addEventListener('click', () => glide(1));
+
+    let last = performance.now();
+    const tick = (now: number) => {
+      const seconds = Math.min(now - last, 100) / 1000;
+      last = now;
+      const paused = !visible || hovered || focused || document.hidden || Date.now() < pausedUntil;
+      if (!paused) {
+        position = wrapOffset(position + SPEED * seconds, loop());
+        track.scrollLeft = position;
+      }
+      shapeCards();
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+</script>
