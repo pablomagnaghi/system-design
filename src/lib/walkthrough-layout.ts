@@ -1,11 +1,20 @@
 import type { WalkthroughEdge, WalkthroughNode } from '../content/types';
 
 /** Diagram coordinates. The canvas scales, so everything is expressed in this space. */
-export const VIEW = { width: 1000, height: 360 } as const;
+export const VIEW = { width: 1040, height: 374 } as const;
 
-const NODE = { width: 140, height: 76 } as const;
-const COLUMN_STEP = 172;
-const ROW_TOP: Record<WalkthroughNode['row'], number> = { top: 40, middle: 142, bottom: 244 };
+// A 180-unit step leaves a 40-unit gap between columns, enough for a dot to read as traffic while
+// the diagram still fits the text column; the extra height lets a detail wrap to a second line.
+const NODE = { width: 140, height: 88 } as const;
+const COLUMN_STEP = 180;
+// Rows sit 36 units apart so a vertical edge has room for its label beside the moving dots.
+const ROW_TOP: Record<WalkthroughNode['row'], number> = { top: 16, middle: 140, bottom: 264 };
+
+/** Where the lane captions sit: above the top row and below the bottom row. */
+export const LANE_Y = { top: 7, bottom: 363 } as const;
+
+/** Lane captions start at the fourth column, clear of the boxes on the left. */
+export const LANE_X = 3 * COLUMN_STEP;
 
 export interface Box {
   readonly x: number;
@@ -29,16 +38,21 @@ export interface Point {
   readonly y: number;
 }
 
+/** Which side of the line a label sits on, so dots moving along the edge never cover it. */
+export type LabelSide = 'above' | 'right';
+
 export interface EdgeGeometry {
   /** SVG path data. */
   readonly d: string;
-  /** Halfway point along the curve, where an edge label sits. */
+  /** Halfway point along the curve, where an edge label is anchored. */
   readonly mid: Point;
+  readonly labelSide: LabelSide;
 }
 
 /** A cubic Bezier from p0 to p3; its point at t = 0.5 is (p0 + 3p1 + 3p2 + p3) / 8. */
 function cubic(p0: Point, p1: Point, p2: Point, p3: Point): EdgeGeometry {
   return {
+    labelSide: 'above',
     d: `M ${p0.x} ${p0.y} C ${p1.x} ${p1.y}, ${p2.x} ${p2.y}, ${p3.x} ${p3.y}`,
     mid: { x: (p0.x + 3 * p1.x + 3 * p2.x + p3.x) / 8, y: (p0.y + 3 * p1.y + 3 * p2.y + p3.y) / 8 },
   };
@@ -46,6 +60,7 @@ function cubic(p0: Point, p1: Point, p2: Point, p3: Point): EdgeGeometry {
 
 function line(p0: Point, p1: Point): EdgeGeometry {
   return {
+    labelSide: p0.x === p1.x ? 'right' : 'above',
     d: `M ${p0.x} ${p0.y} L ${p1.x} ${p1.y}`,
     mid: { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 },
   };

@@ -94,7 +94,7 @@ export const collaborativeEditor: Design = {
       },
       {
         id: 'session',
-        title: 'Document session',
+        title: 'Doc session',
         detail: 'Orders + transforms',
         column: 2,
         row: 'middle',
@@ -102,7 +102,7 @@ export const collaborativeEditor: Design = {
       },
       {
         id: 'registry',
-        title: 'Session registry',
+        title: 'Doc registry',
         detail: 'Owner per document',
         column: 2,
         row: 'bottom',

@@ -59,7 +59,7 @@
   color: var(--success);
 }
 
-/* Below ~900px the canvas scrolls sideways instead of shrinking text to nothing. */
+/* On narrow screens the canvas scrolls sideways instead of shrinking the boxes until text overflows. */
 .scroller {
   overflow-x: auto;
   padding: 16px;
@@ -67,7 +67,7 @@
 
 .canvas {
   position: relative;
-  min-width: 860px;
+  min-width: 880px;
 }
 
 .edges {
@@ -104,7 +104,6 @@
 
 .edgeLabel {
   position: absolute;
-  transform: translate(-50%, -50%);
   padding: 1px 6px;
   border-radius: 6px;
   background: var(--surface);
@@ -116,6 +115,15 @@
   pointer-events: none;
 }
 
+/* Labels sit beside the line, never on it, so the dots moving along the edge stay visible. */
+.labelAbove {
+  transform: translate(-50%, calc(-100% - 5px));
+}
+
+.labelRight {
+  transform: translate(8px, -50%);
+}
+
 .edgeLabelActive {
   border-color: var(--accent);
   color: var(--accent);
@@ -123,7 +131,6 @@
 
 .lane {
   position: absolute;
-  left: 51.6%;
   transform: translateY(-50%);
   font-family: var(--mono);
   font-size: 0.68rem;
@@ -139,7 +146,7 @@
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  padding: 6px 10px;
+  padding: 6px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -150,12 +157,12 @@
 }
 
 .node strong {
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   line-height: 1.2;
 }
 
 .node span {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   line-height: 1.25;
   color: var(--text-muted);
 }
@@ -211,6 +218,15 @@
   background: var(--danger);
 }
 
+/* Names the bar, so a percentage next to a box title is not read as a property of the title. */
+.node .loadLabel {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
 .node .loadValue {
   font-family: var(--mono);
   font-size: 0.62rem;
@@ -219,12 +235,12 @@
 
 .dot {
   position: absolute;
-  width: 12px;
-  height: 12px;
-  margin: -6px 0 0 -6px;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0 3px var(--surface);
+  box-shadow: 0 0 0 2px var(--surface);
   pointer-events: none;
   /* Hidden until the first frame places it, so it never flashes in a corner. */
   opacity: 0;
@@ -236,16 +252,16 @@
 }
 
 .dotHeavy {
-  width: 15px;
-  height: 15px;
-  margin: -7.5px 0 0 -7.5px;
+  width: 13px;
+  height: 13px;
+  margin: -6.5px 0 0 -6.5px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--danger) 55%, #e8a33d);
 }
 
 .dotHealth {
   background: var(--surface);
-  border: 2.5px solid var(--success);
+  border: 2px solid var(--success);
 }
 
 .dotFailed {
@@ -365,8 +381,9 @@
   display: flex;
   gap: 4px;
   list-style: none;
-  margin: 14px 0 0;
-  padding: 0;
+  margin: 6px 0 0;
+  /* Room for the current step's enlarged circle and halo, which the horizontal scroll would clip. */
+  padding: 8px 0 2px;
   overflow-x: auto;
 }
 
@@ -387,14 +404,14 @@
 }
 
 .timeline li.stepDone::after {
-  background: var(--text-muted);
+  background: var(--accent);
 }
 
 .timeline button {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 10px;
   width: 100%;
   padding: 0;
   border: 0;
@@ -420,6 +437,10 @@
   background: var(--bg);
   font-family: var(--mono);
   font-size: 0.8rem;
+  transition:
+    transform 250ms ease,
+    background 250ms ease,
+    box-shadow 250ms ease;
 }
 
 .stepLabel {
@@ -428,21 +449,47 @@
   text-align: center;
 }
 
+/* A finished step is a filled circle with a check; the number is still announced by the button label. */
 .timeline .stepDone .stepNumber {
-  border-color: var(--text-muted);
-  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent);
+  color: transparent;
+  position: relative;
 }
 
-.timeline .stepCurrent .stepNumber {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
+.timeline .stepDone .stepNumber::before {
+  content: '✓';
+  position: absolute;
+  color: var(--surface);
+  font-family: var(--sans, inherit);
+  font-size: 0.9rem;
   font-weight: 700;
 }
 
-.timeline .stepCurrent .stepLabel {
+.timeline .stepDone .stepLabel {
   color: var(--text);
-  font-weight: 600;
+}
+
+/* The current step stands out: filled, slightly larger and with a soft halo that breathes. */
+.timeline .stepCurrent .stepNumber {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--surface);
+  font-weight: 700;
+  transform: scale(1.15);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+  animation: currentStep 1.8s ease-in-out infinite;
+}
+
+@keyframes currentStep {
+  50% {
+    box-shadow: 0 0 0 6px var(--accent-soft);
+  }
+}
+
+.timeline .stepCurrent .stepLabel {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .narration {
@@ -473,7 +520,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .enter {
+  .enter,
+  .timeline .stepCurrent .stepNumber {
     animation: none;
   }
   .edgeActive {

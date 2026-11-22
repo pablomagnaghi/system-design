@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { edgeGeometry, edgeKey, edgePath, nodeBox, VIEW } from './walkthrough-layout';
+import { edgeGeometry, edgeKey, edgePath, LANE_Y, nodeBox, VIEW } from './walkthrough-layout';
 import { initPlayer, playerReducer, playLabel, type PlayerState } from './walkthrough-player';
 
 describe('playerReducer', () => {
@@ -46,13 +46,32 @@ describe('layout', () => {
     }
   });
 
+  it('keeps the lane captions clear of the rows they label', () => {
+    expect(LANE_Y.top).toBeLessThan(nodeBox({ column: 0, row: 'top' }).y);
+    const bottom = nodeBox({ column: 0, row: 'bottom' });
+    expect(LANE_Y.bottom).toBeGreaterThan(bottom.y + bottom.height);
+    expect(LANE_Y.bottom).toBeLessThan(VIEW.height);
+  });
+
+  it('leaves room between rows for a vertical edge and its label', () => {
+    const top = nodeBox({ column: 0, row: 'top' });
+    const middle = nodeBox({ column: 0, row: 'middle' });
+    expect(middle.y - (top.y + top.height)).toBeGreaterThanOrEqual(36);
+  });
+
+  it('leaves room between columns for a stream of dots', () => {
+    const left = nodeBox({ column: 0, row: 'middle' });
+    const right = nodeBox({ column: 1, row: 'middle' });
+    expect(right.x - (left.x + left.width)).toBeGreaterThanOrEqual(40);
+  });
+
   it('connects the right edge of one box to the left edge of the next', () => {
     const path = edgePath(
       nodeBox({ column: 0, row: 'middle' }),
       nodeBox({ column: 1, row: 'top' }),
     );
-    expect(path.startsWith('M 140 166')).toBe(true);
-    expect(path.endsWith('172 78')).toBe(true);
+    expect(path.startsWith('M 140 170')).toBe(true);
+    expect(path.endsWith('180 60')).toBe(true);
     expect(edgeKey(['a', 'b'])).toBe('a>b');
   });
 
@@ -60,14 +79,27 @@ describe('layout', () => {
     const hub = nodeBox({ column: 2, row: 'middle' });
     const up = edgePath(hub, nodeBox({ column: 3, row: 'top' }));
     const down = edgePath(hub, nodeBox({ column: 3, row: 'bottom' }));
-    expect(up.startsWith('M 484 166')).toBe(true);
-    expect(down.startsWith('M 484 194')).toBe(true);
+    expect(up.startsWith('M 500 170')).toBe(true);
+    expect(down.startsWith('M 500 198')).toBe(true);
     expect(
       edgePath(nodeBox({ column: 1, row: 'middle' }), nodeBox({ column: 1, row: 'top' })),
-    ).toBe('M 242 142 L 242 116');
+    ).toBe('M 250 140 L 250 104');
     const back = edgePath(nodeBox({ column: 3, row: 'top' }), hub);
-    expect(back.startsWith('M 586 116')).toBe(true);
-    expect(back.endsWith('484 180')).toBe(true);
+    expect(back.startsWith('M 610 104')).toBe(true);
+    expect(back.endsWith('500 184')).toBe(true);
+  });
+
+  it('puts labels beside the line: right of vertical edges, above the rest', () => {
+    const vertical = edgeGeometry(
+      nodeBox({ column: 1, row: 'middle' }),
+      nodeBox({ column: 1, row: 'top' }),
+    );
+    expect(vertical.labelSide).toBe('right');
+    const forward = edgeGeometry(
+      nodeBox({ column: 0, row: 'middle' }),
+      nodeBox({ column: 1, row: 'middle' }),
+    );
+    expect(forward.labelSide).toBe('above');
   });
 
   it('draws same-row backward edges straight, and finds the midpoint for labels', () => {
@@ -75,12 +107,12 @@ describe('layout', () => {
       nodeBox({ column: 3, row: 'top' }),
       nodeBox({ column: 2, row: 'top' }),
     );
-    expect(same.d).toBe('M 516 78 L 484 78');
-    expect(same.mid).toEqual({ x: 500, y: 78 });
+    expect(same.d).toBe('M 540 60 L 500 60');
+    expect(same.mid).toEqual({ x: 520, y: 60 });
     const back = edgeGeometry(
       nodeBox({ column: 3, row: 'top' }),
       nodeBox({ column: 2, row: 'middle' }),
     );
-    expect(back.mid).toEqual({ x: 573.25, y: 172 });
+    expect(back.mid).toEqual({ x: 596.25, y: 174 });
   });
 });
