@@ -18,7 +18,7 @@ export const newsFeed: Design = {
       'A new post shows up in followers’ feeds within about a minute.',
       'Hundreds of millions of daily users, tens of millions of them online at peak, with reads far outnumbering posts.',
       'Some accounts have tens of millions of followers.',
-      'Private accounts are visible only to approved followers, a blocked user never sees the blocker’s posts, and every request is authenticated.',
+      'Private accounts are visible only to approved followers, a blocked user stops seeing the blocker’s posts within seconds, and every request is authenticated.',
     ],
     outOfScope: [
       'Ranking by predicted interest (the design orders by time; a ranker could reorder the same candidates).',
@@ -58,9 +58,9 @@ export const newsFeed: Design = {
     },
   ],
   dataFlow: [
-    'A new post is stored and an event is queued for fan-out; the author gets an answer at once.',
+    'A new post is stored and the author gets an answer at once; a relay reads the store’s change stream and queues the fan-out.',
     'Fan-out workers page through the author’s followers and add the post ID to the head of each follower’s feed.',
-    'Authors with huge audiences are skipped; their posts are merged in when a follower reads.',
+    'Authors with huge audiences get no fan-out task; their posts are merged in when a follower reads.',
     'Reading a feed fetches the precomputed IDs, merges in posts from big accounts, and hydrates them from a post cache.',
   ],
   highLevel: {
@@ -158,9 +158,9 @@ export const newsFeed: Design = {
       {
         title: 'Hand off the fan-out',
         narration:
-          'The post service puts a "new post" event on a queue and answers the author immediately. Delivering the post to followers happens in the background.',
+          'The post service answers the author as soon as the post is stored. A relay reads the store’s change stream and puts a fan-out task on a queue. Delivering the post to followers happens in the background.',
         tradeoff:
-          'The author never waits for thousands of feed writes, and a spike of posts just makes the queue longer. The cost is that followers see the post seconds later instead of instantly, which suits a feed. Storing the post and queuing the event must not drift apart, so the event comes from the store itself: its change stream records every committed post, acting as the outbox, and a relay turns each record into a fan-out task.',
+          'The author never waits for thousands of feed writes, and a spike of posts just makes the queue longer. The cost is that followers see the post seconds later instead of instantly, which suits a feed. Storing the post and queuing the event must not drift apart, so the event comes from the store itself: its change stream records every committed post, acting as the outbox, and a relay turns each record into a fan-out task, as long as it reads the stream within its 24-hour retention.',
         nodes: ['posts', 'queue'],
         travel: [['posts', 'queue', 'event']],
         short: 'Queue',
@@ -175,7 +175,7 @@ export const newsFeed: Design = {
       {
         title: 'Page through the followers',
         narration:
-          'A fan-out worker takes the event and reads the author’s followers from the follow graph in pages of a few thousand, splitting large lists into many smaller tasks.',
+          'A fan-out worker takes the task and reads the author’s followers from the follow graph in pages of a few thousand, splitting large lists into many smaller tasks.',
         tradeoff:
           'Splitting the work lets many workers share one big fan-out and makes each task cheap to retry. Storing the graph in both directions doubles its size, but both "who follows me" and "whom do I follow" become single lookups.',
         nodes: ['queue', 'fanout', 'graph'],
@@ -192,7 +192,7 @@ export const newsFeed: Design = {
         narration:
           'For each follower, the worker adds the post ID to that follower’s feed, a set ordered by post time in an in-memory store, and trims it to the newest few hundred entries.',
         tradeoff:
-          'Fan-out on write turns every feed read into a single list lookup, at the cost of one write per follower per post. Storing only IDs keeps each feed to a few kilobytes; the cap bounds memory, and older pages fall back to a slower path. Because the feed is keyed by post ID, a retried task adds nothing twice.',
+          'Fan-out on write turns every feed read into a single sorted set lookup, at the cost of one write per follower per post. Storing only IDs keeps each feed to a few kilobytes; the cap bounds memory, and older pages fall back to a slower path. Because the feed is keyed by post ID, a retried task adds nothing twice.',
         nodes: ['fanout', 'feeds'],
         travel: [['fanout', 'feeds', 'prepend']],
         short: 'Prepend',
@@ -227,7 +227,7 @@ export const newsFeed: Design = {
       {
         title: 'Skip the very large accounts',
         narration:
-          'If the author has more than a threshold of followers, say a hundred thousand, the worker does not fan out at all. Those posts stay only in the post store.',
+          'If the author has more than a threshold of followers, say a hundred thousand, the relay creates no fan-out task. Those posts stay only in the post store.',
         tradeoff:
           'One post from an account with tens of millions of followers would mean tens of millions of writes, delaying everyone else’s fan-out. Skipping it moves that cost to read time, where it is paid only by followers who actually open the app.',
         nodes: ['fanout', 'graph'],
@@ -239,7 +239,7 @@ export const newsFeed: Design = {
       {
         title: 'Read the precomputed feed',
         narration:
-          'A reader opens the app. The feed service reads the first page of post IDs from the reader’s feed list in a single lookup.',
+          'A reader opens the app. The feed service reads the first page of post IDs from the reader’s feed, a sorted set, in a single lookup.',
         tradeoff:
           'The expensive work was done ahead of time, so the read is fast and its cost does not grow with the number of accounts followed. The price is memory for a feed per user and work wasted on feeds nobody opens.',
         nodes: ['client', 'api', 'feedSvc', 'feeds'],
@@ -260,9 +260,9 @@ export const newsFeed: Design = {
       {
         title: 'Merge in posts from large accounts',
         narration:
-          'The feed service looks up which large accounts the reader follows, fetches their recent posts from the post cache, and merges them with the precomputed IDs by time.',
+          'The feed service intersects the reader’s following list, cached next to the feed and rewritten on each follow or unfollow, with the set of accounts over the threshold, which is small enough to keep in every task’s memory. It fetches their recent posts from the post cache and merges them with the precomputed IDs by time.',
         tradeoff:
-          'This hybrid keeps writes bounded and still shows posts from huge accounts within seconds. It makes reads a little more complex, but accounts over the threshold are a small share of those a reader follows, their recent posts come back in one batched call, and they are among the most cached objects in the system.',
+          'This hybrid keeps writes bounded and still shows posts from huge accounts within about a minute. It makes reads a little more complex, but accounts over the threshold are a small share of those a reader follows, their recent posts come back in one batched call, and they are among the most cached objects in the system.',
         nodes: ['feedSvc', 'postCache'],
         travel: [['feedSvc', 'postCache', 'hydrate']],
         short: 'Merge large',
@@ -341,7 +341,7 @@ export const newsFeed: Design = {
           from: 'db',
           to: 'stream',
           label: 'stream record',
-          note: 'Every committed write appears in the table’s stream. This is the outbox without an outbox table: the post and its event cannot diverge.',
+          note: 'Every committed write appears in the table’s stream. This is the outbox without an outbox table: the post and its event cannot diverge, as long as the relay reads the stream within its 24-hour retention.',
           style: 'async',
         },
         {
@@ -387,13 +387,13 @@ export const newsFeed: Design = {
           from: 'worker',
           to: 'graph',
           label: 'followers of ana, active only',
-          note: 'Followers are read in pages of a few thousand; inactive users and, for a private account, unapproved followers are skipped.',
+          note: 'Followers are read in pages of a few thousand. Each follower edge carries an active flag, set when the user returns and cleared by a sweep after a few weeks without a read; inactive users and, for a private account, unapproved followers are skipped.',
         },
         {
           from: 'worker',
           to: 'feeds',
-          label: 'ZADD feed:u postId; trim to 500',
-          note: 'Each follower’s feed is a sorted set keyed by post ID, so a retried task adds nothing twice, and the trim keeps memory bounded.',
+          label: 'add postId to feed:u if it exists; trim to 500',
+          note: 'Each follower’s feed is a sorted set keyed by post ID, so a retried task adds nothing twice, and the trim keeps memory bounded. The add is a small script that runs only if the feed key exists, so a feed that was evicted or lost is never recreated with one entry; it is rebuilt whole by pull on its next read.',
         },
         {
           from: 'worker',
@@ -445,8 +445,8 @@ export const newsFeed: Design = {
         {
           from: 'feedsvc',
           to: 'pcache',
-          label: 'MGET 20 post bodies',
-          note: 'One batched call; the few misses are read from the post store with concurrent misses for the same post coalesced.',
+          label: 'batched GET of 20 post bodies',
+          note: 'One batched round, pipelined per shard because the keys live on different shards; the few misses are read from the post store with concurrent misses for the same post coalesced.',
         },
         {
           from: 'feedsvc',
@@ -534,7 +534,7 @@ export const newsFeed: Design = {
           from: 'feedsvc',
           to: 'feeds',
           label: 'store her feed, mark active',
-          note: 'From now on fan-out includes Carla again.',
+          note: 'The active flag on her follow edges is set, so from now on fan-out includes Carla again.',
         },
         {
           from: 'feedsvc',
@@ -623,7 +623,7 @@ export const newsFeed: Design = {
         },
       ],
       choice:
-        'Both. Fan-out pushes a private account’s post only to approved followers, read from the same follow graph. On read, hydration drops posts whose author has blocked the reader or whose visibility no longer allows them, using a small per-user block set cached next to the feed. Unfollows are cleaned up in the background, and the post cache holds visibility with each post, so a change made private takes effect on the next page.',
+        'Both. Fan-out pushes a private account’s post only to approved followers, read from the same follow graph. On read, hydration drops posts whose author has blocked the reader or whose visibility no longer allows them, using a small per-user block set cached next to the feed. A block is committed to the store and then replaces the blocked user’s cached set, so it takes effect within seconds; a fill can race that update, so the set also expires after a minute and is reloaded from the store. Unfollows are cleaned up in the background, and the post cache holds visibility with each post, so a change made private takes effect on the next page.',
     },
     {
       question: 'What about the posts every reader of a huge account asks for?',
@@ -662,7 +662,7 @@ export const newsFeed: Design = {
         },
       ],
       choice:
-        'Pull at most the large accounts the reader follows, in one batched call, and cache the merged pulled list per reader for about a minute; scrolling pages read from it. Readers who follow more than a few hundred large accounts are rare, and a minute matches the freshness target for pushed posts anyway.',
+        'Pull from at most a few hundred of the large accounts the reader follows, in one batched call, and cache the merged pulled list per reader for about a minute; scrolling pages read from it. Readers who follow more than a few hundred large accounts are rare, and a minute matches the freshness target for pushed posts anyway.',
     },
     {
       question: 'What changes with several regions?',
@@ -684,7 +684,7 @@ export const newsFeed: Design = {
         },
       ],
       choice:
-        'Replicate posts and the follow graph, with DynamoDB global tables, and let each region fan out into its own feed cache for the users who live there. Each user is assigned a home region for writes, so a follow or a post is written in one place. Derived data is rebuilt locally, never copied.',
+        'Replicate posts and the follow graph, with DynamoDB global tables, and let each region fan out into its own feed cache for the users who live there. Each user is assigned a home region for writes, so a follow or a post is written in one place. The two directions of a follow are atomic only in the region that wrote them; another region can see one before the other for a moment. Derived data is rebuilt locally, never copied.',
     },
     {
       question: 'How would we add ranking?',
@@ -721,12 +721,12 @@ export const newsFeed: Design = {
       {
         property: 'Fan-out delivery',
         promise:
-          'At least once, made harmless by the post ID. The store’s change stream records every committed post, so a stored post always produces an event; tasks are acknowledged only after their feed writes succeed, and adding a post ID that a feed already holds changes nothing.',
+          'At least once, made harmless by the post ID. The store’s change stream records every committed post, so a stored post always produces an event, as long as the relay reads the stream within its 24-hour retention; tasks are acknowledged only after their feed writes succeed, and adding a post ID that a feed already holds changes nothing.',
       },
       {
         property: 'Feed freshness',
         promise:
-          'Eventual. A pushed post reaches the feeds of active followers within about a minute while the queue keeps up; this is an objective measured from post time to feed write, not a hard bound. Posts from accounts over the threshold are read from the author’s recent posts on every page, so they do not depend on fan-out at all.',
+          'Eventual. A pushed post reaches the feeds of active followers within about a minute while the queue keeps up; this is an objective measured from post time to feed write, not a hard bound. Posts from accounts over the threshold are read from the author’s recent posts at read time, so they do not depend on fan-out at all; they are at most about a minute stale because of the per-reader merge cache.',
       },
       {
         property: 'Pagination',
@@ -741,16 +741,16 @@ export const newsFeed: Design = {
     ],
     assumes: [
       'Feed writes are idempotent: the feed is a set keyed by post ID, never an append-only list.',
-      'The fan-out queue redelivers unacknowledged tasks and keeps events for a few hours, so a window can be replayed.',
+      'The fan-out queue redelivers unacknowledged tasks, and the store’s change stream keeps 24 hours of records, so the posts of a recent window can be fanned out again.',
       'Post IDs are unique and roughly time ordered, and server clocks agree to within tens of milliseconds.',
-      'Any feed can be rebuilt by pull from the follow graph and the post store, so losing feed cache memory costs latency, not data.',
+      'Any feed can be rebuilt by pull from the follow graph and the post store, so losing feed cache memory costs latency, not data. Fan-out adds only to a feed that exists, so a lost feed is rebuilt whole instead of being left partial.',
       'The follow graph read by a fan-out task may be seconds stale; an account followed during a fan-out can miss that one post.',
     ],
     doesNotGuarantee: [
       'A total order across authors. Order follows creation timestamps, so two posts made within clock skew of each other can appear in either order.',
       'That a post delivered late is seen in the current scroll. If it lands below a cursor the reader has already passed, it appears on the next load from the top.',
       'That the author’s followers see a post at the same moment, or that the server shows authors their own post instantly; the client inserts it locally.',
-      'Immediate removal after an unfollow or a block. Entries already pushed are filtered at read time for blocks and cleaned up in the background for unfollows.',
+      'Immediate removal after an unfollow or a block. Entries already pushed are filtered at read time for blocks, within seconds and within the block set’s one-minute TTL at worst, and cleaned up in the background for unfollows.',
       'A complete history. The cached feed holds a few hundred entries; older pages come from a slower pull.',
     ],
   },
@@ -760,7 +760,7 @@ export const newsFeed: Design = {
       impact:
         'Posts are stored and the authors see them, but no follower receives them. If the outage outlasted the stream’s retention, those events would be lost.',
       detection:
-        'The relay’s IteratorAge, the age of the oldest unread stream record, alarmed at 30 s, far below the 24-hour retention, and a count of posts with no fan-out record.',
+        'The relay’s IteratorAge, the age of the oldest unread stream record, alarmed at 10 s, far below the 24-hour retention.',
       recovery:
         'The relay resumes from its last checkpoint in the stream and publishes everything after it. The event may then be published twice; the post ID makes the second fan-out a no-op. The post ends up in every feed once.',
     },
@@ -781,7 +781,7 @@ export const newsFeed: Design = {
       detection:
         'The failover event itself, replication lag at the time of failover, and the rate of feed misses and rebuilds on that shard.',
       recovery:
-        'Fan-out events from a window before the failover are replayed from the queue; idempotent adds fill only the gaps. A feed that is missing entirely is rebuilt by pull on its next read, with rebuilds rate limited so they cannot overload the post store. Both paths converge to the same feed.',
+        'Posts created in a window before the failover are re-read from the store’s change stream, which keeps 24 hours of records, and fanned out again; idempotent adds fill only the gaps. A feed that is missing entirely is rebuilt by pull on its next read, with rebuilds rate limited so they cannot overload the post store. Both paths converge to the same feed.',
     },
     {
       scenario:
@@ -789,7 +789,7 @@ export const newsFeed: Design = {
       impact:
         'Posts reach feeds minutes late and the freshness objective is missed. Nothing is lost and reads stay fast, but they serve older content.',
       detection:
-        'Age of the oldest event in the queue, and the p99 time from post creation to feed write, alarmed against the one-minute target.',
+        'Age of the oldest task in each queue, alarmed at 30 s, and the p99 time from post creation to the last feed write, alarmed at the 60 s target.',
       recovery:
         'Workers scale on queue age. Small and large fan-outs use separate queues so one large job cannot delay thousands of small ones, and the push threshold can be lowered for a while so more authors are pulled at read time. The backlog drains and feeds converge.',
     },
@@ -816,7 +816,7 @@ export const newsFeed: Design = {
       '300M daily users, 50M online at peak, and 500M users active in the last few weeks.',
       'Each daily user loads about 30 feed pages of 20 posts; one user in three publishes a post each day.',
       'A typical author has 200 followers, about half of them active recently. Accounts over 100K followers are not pushed.',
-      'A feed holds up to 500 post IDs at about 16 bytes each (ID and timestamp), and a stored post is about 1 KB with media kept elsewhere.',
+      'A feed holds up to 500 post IDs at about 16 bytes each (ID and timestamp) in the sorted set’s compact encoding, and a stored post is about 1 KB with media kept elsewhere.',
       'Peak traffic is about twice the daily average, and fan-out workers are provisioned for about 350K feed writes a second.',
     ],
     estimates: [
@@ -856,7 +856,7 @@ export const newsFeed: Design = {
       'Fan-out writes (230K/s) exceed feed reads (200K/s) even though posts are rare. The cost of this design is write amplification, which is why inactive users are skipped: pushing to every follower would double it.',
       'A single 30M-follower post would use every spare write for five minutes and delay all other posts, so accounts over the threshold are pulled at read time. The largest pushed post is then 100K writes, about a second of spare capacity.',
       'The feed cache is sized by memory, not by throughput: 430K operations/s over 55 primaries is about 8K each. The two levers are therefore the 500-entry cap and the active-user window, not faster nodes.',
-      '4M post lookups a second cannot go to the post store, so hydration is one batched call to a cache, and a 1% miss rate still means 40K store reads a second. Recent posts are a few hundred gigabytes, which fits in memory.',
+      '4M post lookups a second cannot go to the post store, so hydration is one batched call to a cache, and a 1% miss rate still means 40K store reads a second; the store is provisioned for about twice that. Recent posts are a few hundred gigabytes, which fits in memory.',
       'A hundred gigabytes a day outgrows one machine within weeks, so the post store is partitioned from the start, by author because that is how the pull path reads it.',
     ],
   },
@@ -881,7 +881,7 @@ export const newsFeed: Design = {
       {
         part: 'Outbox',
         service: 'DynamoDB Streams read by an AWS Lambda relay',
-        why: 'Every committed post appears in the stream, so the post and its fan-out event cannot diverge without a separate outbox table.',
+        why: 'Every committed post appears in the stream, so the post and its fan-out event cannot diverge while the relay reads the stream within its 24-hour retention, without a separate outbox table.',
         watch:
           'Lambda IteratorAge on the stream, the post-to-event delay; Errors and Throttles on the relay.',
       },
@@ -897,7 +897,7 @@ export const newsFeed: Design = {
         part: 'Follow graph',
         service:
           'Amazon DynamoDB: one item per direction, written together with TransactWriteItems',
-        why: '"Who follows me" and "whom do I follow" are each one query; the two directions never disagree.',
+        why: '"Who follows me" and "whom do I follow" are each one query; the two directions never disagree in the region that wrote them.',
         watch:
           'ConsumedReadCapacityUnits, which follows fan-out pages, and throttling on very large follower lists.',
       },
@@ -940,9 +940,10 @@ export const newsFeed: Design = {
     limits: [
       'DynamoDB Streams keep records for 24 hours, so a relay outage longer than that would lose events; the relay’s IteratorAge has an alarm far below that.',
       'One DynamoDB partition takes about 1,000 writes a second, far above any human author, but a bot posting in a loop is throttled there first.',
-      'An SQS message is at most 256 KB, so a task carries a post ID and a follower page, never the follower list itself.',
+      'An SQS message is at most 1 MiB, so a task carries a post ID and the position of one follower page, never the follower list itself.',
       'ElastiCache reserves part of each node’s memory, so a 105 GB node holds about 75 GB of feeds, which is what the capacity plan uses.',
       'A sorted set lives on one shard, so a single feed is capped by one node; with 8 KB feeds sharded by user that is never the limit.',
+      'A sorted set keeps its compact encoding only up to 128 entries by default (zset-max-listpack-entries), so that limit is raised to 500; otherwise each entry would cost several times the 16 bytes the capacity plan uses.',
     ],
   },
   slos: [
@@ -971,20 +972,27 @@ export const newsFeed: Design = {
   alarms: [
     {
       name: 'Fan-out falling behind',
-      metric: 'SQS ApproximateAgeOfOldestMessage above 30 s on the small queue',
+      metric: 'SQS ApproximateAgeOfOldestMessage above 30 s on either fan-out queue',
       meaning:
         'The first bottleneck: posts will miss the freshness target; scale workers or lower the push threshold for a while.',
     },
     {
       name: 'Events not leaving the store',
-      metric: 'Lambda IteratorAge on the posts stream above 30 s',
-      meaning: 'The relay is failing or throttled; posts are stored but nobody is being told.',
+      metric: 'Lambda IteratorAge on the posts stream above 10 s',
+      meaning:
+        'The relay is failing or throttled; posts are stored but nobody is being told. With the 30 s queue alarm, both delays stay under the 60 s freshness target before either fires.',
+    },
+    {
+      name: 'Freshness target missed',
+      metric: 'Custom: p99 time from post creation to the last feed write above 60 s',
+      meaning:
+        'The freshness SLO is being missed, whichever step is slow: the relay, a queue or the workers.',
     },
     {
       name: 'Post cache misses',
-      metric: 'ElastiCache CacheHitRate below 97% on the post cache',
+      metric: 'ElastiCache CacheHitRate below 98% on the post cache',
       meaning:
-        'Hydration is leaking to the post store; at 4M lookups a second every point is 40K store reads.',
+        'Hydration is leaking to the post store; at 4M lookups a second every point is 40K store reads, and the store is provisioned for about two points.',
     },
     {
       name: 'Feed cache memory',
