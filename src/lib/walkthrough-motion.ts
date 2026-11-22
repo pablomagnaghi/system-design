@@ -11,8 +11,14 @@ export function visibleAt(walkthrough: Walkthrough, stage: number) {
   const nodes = new Set(
     walkthrough.nodes.filter((node) => (node.appearsAt ?? 0) <= at).map((node) => node.id),
   );
+  const limited = new Map(
+    (walkthrough.edgeStages ?? []).map(({ edge, stages }) => [edgeKey(edge), stages]),
+  );
   const edges = new Set(
-    walkthrough.edges.filter(([from, to]) => nodes.has(from) && nodes.has(to)).map(edgeKey),
+    walkthrough.edges
+      .filter(([from, to]) => nodes.has(from) && nodes.has(to))
+      .map(edgeKey)
+      .filter((key) => limited.get(key)?.includes(at) ?? true),
   );
   return { nodes, edges };
 }
