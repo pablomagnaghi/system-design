@@ -37,6 +37,8 @@ const others = designs.filter((other) => other.slug !== design.slug);
       {design.guarantees && <a href="#guarantees">Guarantees</a>}
       {design.failures && design.failures.length > 0 && <a href="#failures">Failures</a>}
       {design.capacity && <a href="#capacity">Capacity</a>}
+      {design.slos && design.slos.length > 0 && <a href="#slos">SLOs and alarms</a>}
+      {design.infrastructure && <a href="#infrastructure">Infrastructure</a>}
       {design.evolution && <a href="#evolution">Evolution</a>}
     </nav>
 
@@ -220,7 +222,7 @@ const others = designs.filter((other) => other.slug !== design.slug);
           ))}
         </ul>
         <div class="table-wrap">
-          <table>
+          <table class="split">
             <thead>
               <tr>
                 <th>Estimate</th>
@@ -242,6 +244,101 @@ const others = designs.filter((other) => other.slug !== design.slug);
         <h3>What the numbers force</h3>
         <ul>
           {design.capacity.implications.map((item) => (
+            <li>{item}</li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    {design.slos && design.slos.length > 0 && (
+      <section id="slos">
+        <h2>Service level objectives</h2>
+        <p class="muted">
+          The few numbers on-call watches. When one burns its error budget, it points to a failure
+          above.
+        </p>
+        <div class="table-wrap">
+          <table class="split">
+            <thead>
+              <tr>
+                <th>Objective</th>
+                <th>Target</th>
+                <th>Measured by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {design.slos.map((slo) => (
+                <tr>
+                  <th>{slo.objective}</th>
+                  <td class="service">{slo.target}</td>
+                  <td>{slo.measure}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {design.alarms && design.alarms.length > 0 && (
+          <>
+            <h3>Alarms that page someone</h3>
+            <div class="table-wrap">
+              <table class="split">
+                <thead>
+                  <tr>
+                    <th>Alarm</th>
+                    <th>Metric</th>
+                    <th>What it means</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {design.alarms.map((alarm) => (
+                    <tr>
+                      <th>{alarm.name}</th>
+                      <td class="service">{alarm.metric}</td>
+                      <td>{alarm.meaning}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+    )}
+
+    {design.infrastructure && (
+      <section id="infrastructure">
+        <h2>Infrastructure on {design.infrastructure.provider}</h2>
+        <p class="muted">{design.infrastructure.intro}</p>
+        <div class="table-wrap">
+          <table class="split">
+            <thead>
+              <tr>
+                <th>Part</th>
+                <th>Service</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              {design.infrastructure.items.map((item) => (
+                <tr>
+                  <th>{item.part}</th>
+                  <td class="service">{item.service}</td>
+                  <td>
+                    {item.why}
+                    {item.watch && (
+                      <span class="watch">
+                        <strong>Watch:</strong> {item.watch}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <h3>Limits the design has to respect</h3>
+        <ul>
+          {design.infrastructure.limits.map((item) => (
             <li>{item}</li>
           ))}
         </ul>
@@ -480,6 +577,41 @@ const others = designs.filter((other) => other.slug !== design.slug);
   .failure dd,
   .evolution dd {
     margin-bottom: 10px;
+  }
+  /* Fixed columns so a long value or service name wraps instead of squeezing the explanation. */
+  .split {
+    table-layout: fixed;
+  }
+  .split th:nth-child(1) {
+    width: 20%;
+  }
+  .split th:nth-child(2) {
+    width: 30%;
+  }
+  .split .service {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .watch {
+    display: block;
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+  .watch strong {
+    color: var(--text);
+  }
+  #slos h3 {
+    margin-top: 32px;
+  }
+  .split .value {
+    white-space: normal;
+  }
+  @media (max-width: 640px) {
+    .split {
+      table-layout: auto;
+      min-width: 560px;
+    }
   }
   .value {
     font-family: var(--mono);
