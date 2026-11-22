@@ -3,6 +3,8 @@ import type { Walkthrough, WalkthroughStage } from '../content/types';
 import {
   edgeGeometry,
   edgeKey,
+  LANE_X,
+  LANE_Y,
   nodeBox,
   percentX,
   percentY,
@@ -12,8 +14,10 @@ import { hasMetrics, loadLevel, metricItems } from '../lib/walkthrough-metrics';
 import {
   DOTS_PER_PACKET,
   dotProgress,
+  dotsForLength,
   legendFor,
   packetsFor,
+  streamOffsets,
   visibleAt,
   type Packet,
 } from '../lib/walkthrough-motion';
@@ -106,15 +110,24 @@ export default function Walkthrough({ walkthrough }: Props) {
     const paths = packets.map((packet) =>
       svg.querySelector<SVGPathElement>(`[data-edge="${edgeKey(packet.edge)}"]`),
     );
+    const lengths = paths.map((path) => path?.getTotalLength() ?? 0);
+    const offsets = streamOffsets(packets);
     const place = (elapsed: number) => {
       packets.forEach((packet, p) => {
         const path = paths[p];
         if (!path) return;
+        const length = lengths[p] ?? 0;
+        const count = dotsForLength(length);
         for (let d = 0; d < DOTS_PER_PACKET; d++) {
           const dot = dotRefs.current[p * DOTS_PER_PACKET + d];
           if (!dot) continue;
-          const progress = dotProgress(elapsed, d, packet.kind, TRAVEL_MS);
-          const point = path.getPointAtLength(path.getTotalLength() * progress);
+          // Short edges show fewer dots; the spare ones stay hidden.
+          if (d >= count) {
+            dot.style.opacity = '0';
+            continue;
+          }
+          const progress = dotProgress(elapsed, d, packet.kind, TRAVEL_MS, count, offsets[p]);
+          const point = path.getPointAtLength(length * progress);
           dot.style.left = percentX(point.x);
           dot.style.top = percentY(point.y);
           // A failed request fades out where it gives up.
@@ -159,7 +172,7 @@ export default function Walkthrough({ walkthrough }: Props) {
         <dl className={styles.metrics} aria-label="System metrics">
           {metrics.length > 0 ? (
             metrics.map((metric) => (
-              <div key={metric.key} className={styles[metric.status]}>
+              <div key={metric.key} className={styles[metric.status]} title={metric.hint}>
                 <dt>{metric.label}</dt>
                 <dd>{metric.value}</dd>
               </div>
@@ -192,7 +205,11 @@ export default function Walkthrough({ walkthrough }: Props) {
             label && visible.edges.has(key) ? (
               <span
                 key={`label-${key}`}
-                className={[styles.edgeLabel, activeEdges.has(key) && styles.edgeLabelActive]
+                className={[
+                  styles.edgeLabel,
+                  geometry.labelSide === 'right' ? styles.labelRight : styles.labelAbove,
+                  activeEdges.has(key) && styles.edgeLabelActive,
+                ]
                   .filter(Boolean)
                   .join(' ')}
                 style={{ left: percentX(geometry.mid.x), top: percentY(geometry.mid.y) }}
@@ -203,12 +220,18 @@ export default function Walkthrough({ walkthrough }: Props) {
           )}
 
           {lanes?.top && (
-            <span className={styles.lane} style={{ top: percentY(8) }}>
+            <span
+              className={styles.lane}
+              style={{ left: percentX(LANE_X), top: percentY(LANE_Y.top) }}
+            >
               {lanes.top}
             </span>
           )}
           {lanes?.bottom && (
-            <span className={styles.lane} style={{ top: percentY(330) }}>
+            <span
+              className={styles.lane}
+              style={{ left: percentX(LANE_X), top: percentY(LANE_Y.bottom) }}
+            >
               {lanes.bottom}
             </span>
           )}
@@ -360,7 +383,10 @@ export default function Walkthrough({ walkthrough }: Props) {
 function LoadBar({ percent }: { percent: number }) {
   const level = loadLevel(percent);
   return (
-    <span className={styles.load} aria-label={`Load ${percent}%`}>
+    <span className={styles.load} aria-label={`Load ${percent}%`} title="How busy this part is">
+      <span className={styles.loadLabel} aria-hidden="true">
+        load
+      </span>
       <span className={styles.loadTrack}>
         <span className={`${styles.loadFill} ${styles[level]}`} style={{ width: `${percent}%` }} />
       </span>

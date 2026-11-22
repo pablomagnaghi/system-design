@@ -71,4 +71,8 @@ describe('hasMetrics', () => {
     expect(hasMetrics([stage(), stage()])).toBe(false);
     expect(hasMetrics([stage(), stage({ users: '1K' })])).toBe(true);
   });
+  it('explains each fixed metric in plain words', () => {
+    const [p95] = metricItems({ p95Latency: '400 ms' }, undefined);
+    expect(p95?.hint).toMatch(/95 of every 100 requests/);
+  });
 });

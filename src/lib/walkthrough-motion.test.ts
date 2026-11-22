@@ -3,8 +3,10 @@ import type { Walkthrough, WalkthroughStage } from '../content/types';
 import {
   DOTS_PER_PACKET,
   dotProgress,
+  dotsForLength,
   legendFor,
   packetsFor,
+  streamOffsets,
   visibleAt,
 } from './walkthrough-motion';
 
@@ -80,5 +82,31 @@ describe('dotProgress', () => {
 
   it('never lets a failed request reach its target', () => {
     for (let t = 0; t < 2000; t += 50) expect(dotProgress(t, 0, 'failed', 1000)).toBeLessThan(0.8);
+  });
+
+  it('spaces dots by the stream count and shifts them by the offset', () => {
+    expect(dotProgress(0, 1, 'request', 1000, 2)).toBeCloseTo(0.5);
+    expect(dotProgress(0, 0, 'request', 1000, 1, 0.5)).toBeCloseTo(0.5);
+  });
+});
+
+describe('dotsForLength', () => {
+  it('gives short edges one dot and long edges the full stream', () => {
+    expect(dotsForLength(10)).toBe(1);
+    expect(dotsForLength(32)).toBe(1);
+    expect(dotsForLength(150)).toBe(2);
+    expect(dotsForLength(1000)).toBe(DOTS_PER_PACKET);
+  });
+});
+
+describe('streamOffsets', () => {
+  it('interleaves streams that share an edge and leaves lone streams at zero', () => {
+    expect(
+      streamOffsets([
+        { edge: ['a', 'b'], kind: 'request' },
+        { edge: ['b', 'c'], kind: 'request' },
+        { edge: ['a', 'b'], kind: 'health' },
+      ]),
+    ).toEqual([0, 0, 0.5]);
   });
 });

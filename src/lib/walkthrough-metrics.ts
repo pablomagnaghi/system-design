@@ -8,6 +8,8 @@ export interface MetricItem {
   readonly label: string;
   readonly value: string;
   readonly status: MetricStatus;
+  /** What the metric means, shown as a tooltip. */
+  readonly hint?: string;
 }
 
 /** Display order and labels of the metrics bar. */
@@ -18,6 +20,15 @@ const METRICS: readonly (readonly [MetricKey, string])[] = [
   ['errorRate', 'Errors'],
   ['healthy', 'Healthy servers'],
 ];
+
+/** Plain-language meaning of each fixed metric. */
+export const METRIC_HINTS: Readonly<Record<MetricKey, string>> = {
+  users: 'People using the system at this point in the story.',
+  requestsPerSecond: 'Requests the system handles per second at peak.',
+  p95Latency: '95th percentile: 95 of every 100 requests finish faster than this; 5 take longer.',
+  errorRate: 'Share of requests that fail.',
+  healthy: 'Servers passing health checks, out of the total.',
+};
 
 /**
  * The metrics to show for a stage. A metric is an alert when the stage says so, and "recovered"
@@ -38,7 +49,7 @@ export function metricItems(
       : previousAlerts.has(key)
         ? 'recovered'
         : 'normal';
-    return [{ key, label, value, status }];
+    return [{ key, label, value, status, hint: METRIC_HINTS[key] }];
   });
   const custom = (metrics.custom ?? []).map((metric): MetricItem => {
     const wasAlert = previous?.custom?.some((p) => p.label === metric.label && p.alert) ?? false;
