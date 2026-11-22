@@ -1,0 +1,464 @@
+.flows {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* Tabs: one chip per flow, with how it runs underneath. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 16px 0;
+}
+
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+.tab:hover {
+  border-color: var(--accent);
+}
+
+.tab[aria-selected='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.tab:focus-visible,
+.rowButton:focus-visible,
+.controls button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tabTitle {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.kind {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.kind::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+}
+
+.kind[data-kind='sync'] {
+  color: var(--accent);
+}
+
+.kind[data-kind='scheduled'],
+.kind[data-kind='queue'] {
+  color: var(--success);
+}
+
+.panel {
+  padding: 16px;
+}
+
+.summary {
+  margin: 0 0 12px;
+  font-size: 0.95rem;
+}
+
+.runsOn {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+/* Sequence diagram. Below about 600px it scrolls sideways instead of squeezing the labels. */
+.scroll {
+  overflow-x: auto;
+}
+
+.diagram {
+  min-width: 600px;
+}
+
+.heads {
+  display: grid;
+  grid-template-columns: repeat(var(--lanes), 1fr);
+  gap: 8px;
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  text-align: center;
+  line-height: 1.25;
+}
+
+.head strong {
+  font-size: 0.8rem;
+}
+
+.head span {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
+.body {
+  position: relative;
+  padding: 6px 0 10px;
+}
+
+.lifeline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--border);
+}
+
+.rows {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.arrow,
+.activation,
+.number {
+  transition: opacity 300ms ease;
+}
+
+/* Steps still to come are dimmed by color, not opacity, so their label background stays solid. */
+.row[data-state='next'] .arrow,
+.row[data-state='next'] .activation {
+  opacity: 0.3;
+}
+
+.row[data-state='next'] .number {
+  opacity: 0.6;
+}
+
+.row[data-state='next'] .labelText {
+  color: color-mix(in srgb, var(--text-muted) 55%, var(--surface));
+}
+
+.rowButton {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 54px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.label,
+.selfLabel {
+  position: absolute;
+  top: 6px;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.label {
+  padding: 0 6px;
+  text-align: center;
+}
+
+/* Text sits on the surface color so a lifeline crossing behind it does not cut through it. */
+.labelText {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.selfLabel {
+  top: 16px;
+  white-space: nowrap;
+}
+
+.number {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--border);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  vertical-align: 1px;
+}
+
+.row[data-state='current'] .number {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.row[data-state='current'] .label,
+.row[data-state='current'] .selfLabel {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Arrows: solid for a call, dashed for a reply, dotted for fire-and-continue. */
+.arrow {
+  position: absolute;
+  top: 40px;
+  height: 0;
+  border-top: 2px solid var(--text-muted);
+}
+
+.arrow[data-style='reply'] {
+  border-top-style: dashed;
+}
+
+.arrow[data-style='async'] {
+  border-top-style: dotted;
+}
+
+.arrow::after {
+  content: '';
+  position: absolute;
+  top: -6px;
+  right: -1px;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid var(--text-muted);
+}
+
+.arrow[data-reversed='true']::after {
+  right: auto;
+  left: -1px;
+  border-left: 0;
+  border-right: 8px solid var(--text-muted);
+}
+
+.row[data-state='current'] .arrow {
+  border-top-color: var(--accent);
+}
+
+.row[data-state='current'] .arrow::after {
+  border-left-color: var(--accent);
+}
+
+.row[data-state='current'] .arrow[data-reversed='true']::after {
+  border-left-color: transparent;
+  border-right-color: var(--accent);
+}
+
+.activation {
+  position: absolute;
+  top: 12px;
+  width: 10px;
+  height: 30px;
+  margin-left: -5px;
+  border: 1px solid var(--text-muted);
+  border-radius: 3px;
+  background: var(--bg);
+}
+
+.row[data-state='current'] .activation {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.dot {
+  position: absolute;
+  top: -7px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: travel 1100ms ease-in-out forwards;
+}
+
+.dot[data-reversed='true'] {
+  animation-name: travelBack;
+}
+
+@keyframes travel {
+  from {
+    left: 0;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+@keyframes travelBack {
+  from {
+    left: 100%;
+  }
+  to {
+    left: 0;
+  }
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.controls button {
+  min-width: 40px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.controls .play {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 96px;
+  justify-content: center;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+  transition:
+    transform 120ms ease,
+    background 200ms ease,
+    color 200ms ease;
+}
+
+.controls button:active {
+  transform: scale(0.92);
+}
+
+/* Playing: filled button with a pulsing icon. Paused: outlined. */
+.controls .play[data-playing='true'] {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.playIcon {
+  font-size: 0.7rem;
+  letter-spacing: 1px;
+}
+
+.play[data-playing='true'] .playIcon {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.progress {
+  height: 3px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.progressFill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  background: var(--accent);
+  transform-origin: left;
+  animation: fill linear forwards;
+}
+
+@keyframes fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.counter {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.note {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: var(--accent-soft);
+  min-height: 88px;
+}
+
+.note strong {
+  font-size: 0.9rem;
+}
+
+.note p {
+  margin: 4px 0 0;
+  font-size: 0.92rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .play[data-playing='true'] .playIcon,
+  .progressFill {
+    animation: none;
+  }
+  .dot {
+    animation: none;
+    left: 100%;
+  }
+  .dot[data-reversed='true'] {
+    left: 0;
+  }
+  .arrow,
+  .activation,
+  .number,
+  .tab {
+    transition: none;
+  }
+}

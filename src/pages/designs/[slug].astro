@@ -2,6 +2,8 @@
 import type { GetStaticPaths } from 'astro';
 import { designs, type Design } from '../../content';
 import Walkthrough from '../../components/Walkthrough';
+import RequestFlows from '../../components/RequestFlows';
+import { FLOW_KIND_LABEL } from '../../lib/request-flow';
 import BaseLayout from '../../layouts/BaseLayout.astro';
 
 export const getStaticPaths = (() =>
@@ -33,6 +35,7 @@ const others = designs.filter((other) => other.slug !== design.slug);
       <a href="#api">3 · API</a>
       <a href="#data-flow">4 · Data flow</a>
       <a href="#high-level">5 · High-level design</a>
+      {design.flows && design.flows.length > 0 && <a href="#flows">Request flows</a>}
       <a href="#deep-dives">6 · Deep dives</a>
       {design.guarantees && <a href="#guarantees">Guarantees</a>}
       {design.failures && design.failures.length > 0 && <a href="#failures">Failures</a>}
@@ -64,9 +67,14 @@ const others = designs.filter((other) => other.slug !== design.slug);
           </ul>
         </div>
       </div>
-      <p class="muted small">
-        <strong>Out of scope:</strong> {design.requirements.outOfScope.join(' ')}
-      </p>
+      <div class="out-of-scope muted small">
+        <h3>Out of scope</h3>
+        <ul>
+          {design.requirements.outOfScope.map((item) => (
+            <li>{item}</li>
+          ))}
+        </ul>
+      </div>
     </section>
 
     <section id="entities">
@@ -121,12 +129,53 @@ const others = designs.filter((other) => other.slug !== design.slug);
       <Walkthrough client:visible walkthrough={design.highLevel} />
     </section>
 
+    {design.flows && design.flows.length > 0 && (
+      <section id="flows">
+        <h2>Request flows</h2>
+        <p class="muted">
+          Who calls whom for each user action, and on which service. Pick a flow; it plays step by
+          step, and any step can be selected to read it.
+        </p>
+        <RequestFlows client:visible flows={design.flows} />
+        <h3>In the request, or in a worker?</h3>
+        <div class="table-wrap">
+          <table class="split">
+            <thead>
+              <tr>
+                <th>Flow</th>
+                <th>How it runs</th>
+                <th>Runs on</th>
+              </tr>
+            </thead>
+            <tbody>
+              {design.flows.map((flow) => (
+                <tr>
+                  <th>{flow.title}</th>
+                  <td class="service">{FLOW_KIND_LABEL[flow.kind]}</td>
+                  <td>{flow.runsOn}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    )}
+
     <section id="deep-dives">
       <h2>
         <span class="step">6</span> Deep dives
       </h2>
-      {design.deepDives.map((dive) => (
-        <div class="dive">
+      {design.deepDives.length > 3 && (
+        <ol class="dive-index" aria-label="Deep dive questions">
+          {design.deepDives.map((dive, i) => (
+            <li>
+              <a href={`#dive-${i + 1}`}>{dive.question}</a>
+            </li>
+          ))}
+        </ol>
+      )}
+      {design.deepDives.map((dive, i) => (
+        <div class="dive" id={`dive-${i + 1}`}>
           <h3>{dive.question}</h3>
           <div class="table-wrap">
             <table>
@@ -451,6 +500,12 @@ const others = designs.filter((other) => other.slug !== design.slug);
     font-size: 1.05rem;
     margin: 0 0 8px;
   }
+  .out-of-scope {
+    margin-top: 24px;
+  }
+  .out-of-scope h3 {
+    margin-bottom: 4px;
+  }
   .columns {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
@@ -508,6 +563,24 @@ const others = designs.filter((other) => other.slug !== design.slug);
   }
   .dive {
     margin-bottom: 32px;
+    scroll-margin-top: 80px;
+  }
+  #flows h3 {
+    margin-top: 32px;
+  }
+  .dive-index {
+    margin: 0 0 32px;
+    padding: 12px 16px 12px 36px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    columns: 2 280px;
+    column-gap: 32px;
+    font-size: 0.92rem;
+  }
+  .dive-index li {
+    break-inside: avoid;
+    margin: 2px 0;
   }
   .table-wrap {
     overflow-x: auto;

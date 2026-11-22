@@ -74,6 +74,16 @@ export interface Walkthrough {
   readonly nodes: readonly WalkthroughNode[];
   readonly edges: readonly WalkthroughEdge[];
   readonly stages: readonly WalkthroughStage[];
+  /**
+   * Edges drawn only during the listed stage indexes, such as a direct path that a later stage
+   * replaces. Every other edge shows once both of its ends do.
+   */
+  readonly edgeStages?: readonly EdgeStages[];
+}
+
+export interface EdgeStages {
+  readonly edge: readonly [from: string, to: string];
+  readonly stages: readonly number[];
 }
 
 export interface Entity {
@@ -139,6 +149,8 @@ export interface Design {
   readonly slos?: readonly Slo[];
   /** The alarms that page someone, each tied to one metric. */
   readonly alarms?: readonly Alarm[];
+  /** Who calls whom for each user action, as animated sequence diagrams. */
+  readonly flows?: readonly RequestFlow[];
 }
 
 /** An alarm worth waking up for. */
@@ -148,6 +160,42 @@ export interface Alarm {
   readonly metric: string;
   /** What it means when it fires. */
   readonly meaning: string;
+}
+
+/** How a flow runs: in the request, after it in the same service, or in a separate worker. */
+export type FlowKind = 'sync' | 'async' | 'scheduled' | 'queue' | 'direct';
+
+/** A box at the top of a sequence diagram: a part of the design and the service that runs it. */
+export interface FlowParticipant {
+  readonly id: string;
+  /** Short name, e.g. "Gateway". */
+  readonly label: string;
+  /** What runs it, e.g. "EC2". */
+  readonly service: string;
+}
+
+/** One arrow in a sequence diagram. `from` equal to `to` draws work done inside one participant. */
+export interface FlowStep {
+  readonly from: string;
+  readonly to: string;
+  /** Short text on the arrow, e.g. "send {clientMsgId}". */
+  readonly label: string;
+  /** What happens and why, shown when the step plays. */
+  readonly note: string;
+  /** call: a request (default); reply: a response; async: fire and continue. */
+  readonly style?: 'call' | 'reply' | 'async';
+}
+
+export interface RequestFlow {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: FlowKind;
+  /** One or two sentences on what the flow does. */
+  readonly summary: string;
+  /** What executes it, e.g. "Gateway → Message service → DynamoDB". */
+  readonly runsOn: string;
+  readonly participants: readonly FlowParticipant[];
+  readonly steps: readonly FlowStep[];
 }
 
 /** One service level objective. */

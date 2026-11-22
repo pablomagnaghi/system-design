@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { unknownParticipants } from '../lib/request-flow';
 import { designs, fieldNotes, getDesign } from './index';
 
 // Designs and field notes share the walkthrough rules.
@@ -55,6 +56,14 @@ describe('designs', () => {
       for (const stage of highLevel.stages) {
         for (const id of stage.nodes) expect(nodeIds).toContain(id);
         for (const [from, to] of stage.travel) expect(edgeKeys).toContain(`${from}>${to}`);
+      }
+      // A stage-limited edge must exist and may only carry traffic in the stages that draw it.
+      for (const { edge, stages } of highLevel.edgeStages ?? []) {
+        expect(edgeKeys).toContain(`${edge[0]}>${edge[1]}`);
+        highLevel.stages.forEach((stage, index) => {
+          const uses = stage.travel.some(([f, t]) => f === edge[0] && t === edge[1]);
+          if (uses) expect(stages, `${edge.join('>')} at stage ${index}`).toContain(index);
+        });
       }
     }
   });
@@ -206,6 +215,22 @@ describe('design depth sections', () => {
         );
         expect(filled(alarm.meaning), `${slug}: ${alarm.name}`).toBe(true);
       }
+    }
+  });
+
+  it('draw request flows whose steps name declared participants and explain themselves', () => {
+    for (const { slug, flows } of designs) {
+      for (const flow of flows ?? []) {
+        expect(unknownParticipants(flow), `${slug}: ${flow.id}`).toEqual([]);
+        expect(flow.participants.length, `${slug}: ${flow.id}`).toBeLessThanOrEqual(6);
+        expect(filled(flow.summary) && flow.runsOn.trim().length > 0, `${slug}: ${flow.id}`).toBe(
+          true,
+        );
+        for (const step of flow.steps) {
+          expect(filled(step.note), `${slug}: ${flow.id}: ${step.label}`).toBe(true);
+        }
+      }
+      if (flows) expect(new Set(flows.map((f) => f.id)).size, slug).toBe(flows.length);
     }
   });
 

@@ -44,6 +44,17 @@ describe('visibleAt', () => {
     expect([...visibleAt(walkthrough, 0).edges]).toEqual(['users>server']);
     expect(visibleAt(walkthrough, 2).edges.has('lb>server')).toBe(true);
   });
+
+  it('limits an edge to its listed stages, such as a path a later stage replaces', () => {
+    const limited = {
+      ...walkthrough,
+      edgeStages: [{ edge: ['users', 'server'] as const, stages: [0] }],
+    };
+    expect(visibleAt(limited, -1).edges.has('users>server')).toBe(true);
+    expect(visibleAt(limited, 0).edges.has('users>server')).toBe(true);
+    expect(visibleAt(limited, 1).edges.has('users>server')).toBe(false);
+    expect(visibleAt(limited, 2).edges.has('lb>server')).toBe(true);
+  });
 });
 
 describe('packetsFor', () => {
