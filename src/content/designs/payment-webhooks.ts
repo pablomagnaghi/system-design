@@ -18,8 +18,15 @@ export const paymentWebhooks: Design = {
       'Never lose an acknowledged event: answer 2xx only after the event is durably stored, and keep the raw payload for audit and replay.',
       'Answer within the provider timeout, a few seconds at most, through bursts of a few thousand events per second.',
       'Correctness over speed: a payment applied twice or not at all is an incident.',
+      'Accept nothing that is not signed by the provider, keep signing secrets out of code, and restrict who can read raw payloads, which carry customer data.',
     ],
-    outOfScope: ['Checkout and card collection.', 'Accounting reports.'],
+    outOfScope: [
+      'Checkout and card collection: card numbers never reach this system, only the provider’s object ids.',
+      'Sending payments out (payouts, transfers), which need their own idempotency keys on our requests to the provider.',
+      'Accounting reports, tax and revenue recognition, which read the ledger but do not write it.',
+      'Fraud scoring and dispute handling beyond recording the dispute event.',
+      'Several payment providers: the design is written for one, and a second one adds an adapter per provider in front of the same inbox.',
+    ],
   },
   entities: [
     {
@@ -45,14 +52,15 @@ export const paymentWebhooks: Design = {
     {
       method: 'POST',
       path: '/admin/events/{id}/replay',
-      description: 'Re-runs a stored event after a fix. Safe because handlers are idempotent.',
+      description:
+        'Re-runs a stored event, or every failed event of one type, after a fix. Safe because handlers are idempotent.',
     },
   ],
   dataFlow: [
     'The provider sends a signed event.',
     'The endpoint verifies it, stores it in the inbox and answers 2xx.',
     'A relay publishes stored events to a queue; a processor applies each one to payments and the ledger in one transaction.',
-    'A daily reconciliation compares the ledger with the provider and repairs gaps.',
+    'A daily reconciliation compares the ledger with the provider and repairs gaps by inserting events into the inbox, so repairs go through the same processor.',
   ],
   highLevel: {
     label: 'Run a payment event through the processor',
@@ -103,7 +111,7 @@ export const paymentWebhooks: Design = {
         detail: 'Idempotent handler',
         column: 4,
         row: 'middle',
-        appearsAt: 6,
+        appearsAt: 3,
       },
       {
         id: 'recon',
@@ -123,12 +131,19 @@ export const paymentWebhooks: Design = {
     ],
     edges: [
       ['provider', 'endpoint'],
+      ['endpoint', 'db'],
       ['endpoint', 'inbox'],
+      ['inbox', 'processor'],
       ['inbox', 'queue'],
       ['queue', 'processor'],
       ['queue', 'dlq'],
       ['processor', 'db'],
       ['recon', 'db'],
+      ['recon', 'inbox'],
+    ],
+    edgeStages: [
+      { edge: ['endpoint', 'db'], stages: [0, 1, 2] },
+      { edge: ['inbox', 'processor'], stages: [3, 4] },
     ],
     stages: [
       {
@@ -162,7 +177,10 @@ export const paymentWebhooks: Design = {
         tradeoff:
           'Inline processing is the simplest design and works at low volume. Under a spike it turns slowness into failures, and failures into retries, so load feeds on itself. The fix is to make the request do as little as possible and move the work behind it.',
         nodes: ['provider', 'endpoint', 'db'],
-        travel: [['provider', 'endpoint']],
+        travel: [
+          ['provider', 'endpoint'],
+          ['endpoint', 'db'],
+        ],
         short: 'Timeouts',
         metrics: {
           users: '1M',
@@ -177,14 +195,18 @@ export const paymentWebhooks: Design = {
       {
         title: 'Store, then answer 2xx',
         narration:
-          'An inbox table joins the design. The raw event goes into it and the endpoint answers 2xx right away. No business logic runs inside the request.',
+          'An inbox table joins the design. The raw event goes into it and the endpoint answers 2xx right away. No business logic runs inside the request: a processor behind it polls the inbox and applies each event to the payments and the ledger.',
         tradeoff:
           'Doing the work inside the request is simpler, but a slow handler misses the provider timeout and triggers retries that pile up. Acknowledging first keeps the endpoint fast; in exchange we own retries, so the inbox must be durable.',
-        nodes: ['endpoint', 'inbox'],
-        travel: [['endpoint', 'inbox']],
+        nodes: ['endpoint', 'inbox', 'processor', 'db'],
+        travel: [
+          ['endpoint', 'inbox'],
+          ['inbox', 'processor'],
+          ['processor', 'db'],
+        ],
         short: 'Store, 2xx',
         metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
-        load: { endpoint: 30, inbox: 35 },
+        load: { endpoint: 30, inbox: 35, processor: 40, db: 40 },
       },
       {
         title: 'Duplicates stop at the door',
@@ -201,7 +223,7 @@ export const paymentWebhooks: Design = {
       {
         title: 'Hand off to a work queue',
         narration:
-          'A relay polls the inbox for rows still marked as received and publishes them to a queue that gives retries with backoff and a visibility timeout. The endpoint itself never publishes.',
+          'The processor stops polling the inbox. A relay polls the inbox for rows still marked as received, publishes them to a queue that gives retries with backoff and a visibility timeout, and marks them published. The endpoint itself never publishes. A sweep publishes again any row left published for more than 3 hours, longer than the worst backlog, so a message lost on the way cannot strand an event.',
         tradeoff:
           'A managed queue scales and retries for us. Publishing from the endpoint after the insert would be a dual write: a crash between the two would strand an event that was already acknowledged, and the provider would not send it again. The relay closes that gap at the cost of publishing at least once, which the processor makes harmless by checking the inbox status. At low volume, a worker polling the inbox table is simpler and has one less moving part, and it is easy to move to a queue later.',
         nodes: ['inbox', 'queue'],
@@ -237,7 +259,7 @@ export const paymentWebhooks: Design = {
       {
         title: 'Failures go to dead letters',
         narration:
-          'An event that keeps failing moves to a dead-letter queue and raises an alert. After a fix, it is replayed from the inbox.',
+          'An event that keeps failing moves to a dead-letter queue after five receives and raises an alert. On that last attempt the processor marks its inbox row failed with the error, so the relay sweep does not revive it. After a fix, replay sets the row back to received and the relay publishes it like a new event.',
         tradeoff:
           'Retrying forever hides bugs and blocks nothing visible; giving up silently loses money. A dead-letter queue with an alert makes every stuck event someone’s job, and replay is safe because handlers are idempotent.',
         nodes: ['queue', 'dlq'],
@@ -250,18 +272,292 @@ export const paymentWebhooks: Design = {
       {
         title: 'Reconcile every day',
         narration:
-          'A daily job lists the provider payments and refunds for the period, compares them with the ledger and repairs or flags any difference.',
+          'A daily job lists the provider payments and refunds for the period and compares them with the ledger. It never writes the ledger itself: each difference becomes a synthetic event in the inbox, such as recon:pi_456:charge, and goes through the relay, the queue and the processor like a real webhook.',
         tradeoff:
-          'Reconciliation costs API calls and a job to maintain. Webhooks alone cannot prove that nothing was missed; comparing against the source of truth can.',
-        nodes: ['recon', 'db'],
-        travel: [['recon', 'db']],
+          'Reconciliation costs API calls and a job to maintain. Webhooks alone cannot prove that nothing was missed; comparing against the source of truth can. Repairing through the inbox keeps one write path for money, so the state machine, the ledger keys and the audit trail apply to repairs too, and a real webhook that arrives after the repair is refused by the ledger key.',
+        nodes: ['recon', 'db', 'inbox', 'queue', 'processor'],
+        travel: [
+          ['recon', 'db'],
+          ['recon', 'inbox'],
+          ['inbox', 'queue'],
+          ['queue', 'processor'],
+          ['processor', 'db'],
+        ],
         short: 'Reconcile',
         metrics: { users: '1M', requestsPerSecond: '2K', p95Latency: '40 ms', errorRate: '0%' },
-        load: { recon: 70, db: 50 },
+        load: { recon: 70, db: 50, inbox: 30, processor: 40 },
         traffic: [{ edge: ['recon', 'db'], kind: 'heavy' }],
       },
     ],
   },
+  flows: [
+    {
+      id: 'ingest',
+      title: 'Receive a webhook',
+      kind: 'sync',
+      summary:
+        'The provider posts "payment succeeded" for Ana’s order. The endpoint checks the signature, stores the raw event and answers in about 40 ms. Nothing about the order changes yet.',
+      runsOn: 'AWS WAF → ALB → webhook endpoint on ECS Fargate → Aurora PostgreSQL',
+      participants: [
+        { id: 'provider', label: 'Payment provider', service: 'External' },
+        { id: 'alb', label: 'Load balancer', service: 'ALB + AWS WAF' },
+        { id: 'endpoint', label: 'Webhook endpoint', service: 'ECS Fargate' },
+        { id: 'db', label: 'Inbox table', service: 'Aurora PostgreSQL' },
+      ],
+      steps: [
+        {
+          from: 'provider',
+          to: 'alb',
+          label: 'POST /webhooks/provider + signature header',
+          note: 'HTTPS only. WAF drops oversized bodies and floods before they reach the service; it is a filter, not the proof of origin.',
+        },
+        {
+          from: 'alb',
+          to: 'endpoint',
+          label: 'forward raw body',
+          note: 'The endpoint must keep the raw bytes: the signature is computed over them, and re-serialized JSON would not match.',
+        },
+        {
+          from: 'endpoint',
+          to: 'endpoint',
+          label: 'HMAC(secret, timestamp.body), check timestamp',
+          note: 'Constant-time comparison against the current and the previous secret, cached from Secrets Manager. A timestamp older than the provider’s tolerance is rejected as a replay. A bad signature gets 401 and is never stored.',
+        },
+        {
+          from: 'endpoint',
+          to: 'db',
+          label: 'INSERT inbox ON CONFLICT (event_id) DO NOTHING',
+          note: 'One small row with status received. Aurora acknowledges the commit only after it is on storage in several zones, so a 2xx never covers an event that one machine could lose.',
+        },
+        {
+          from: 'db',
+          to: 'endpoint',
+          label: '1 row, or 0 rows if seen before',
+          note: 'Zero rows means a redelivery: the event is already safe, so the answer is the same.',
+          style: 'reply',
+        },
+        {
+          from: 'endpoint',
+          to: 'provider',
+          label: '200 OK',
+          note: 'Answered after the commit and before any business logic. Any failure before this point is a 5xx, and the provider tries again later.',
+          style: 'reply',
+        },
+      ],
+    },
+    {
+      id: 'relay',
+      title: 'Publish stored events',
+      kind: 'async',
+      summary:
+        'A relay moves committed inbox rows to the work queue. It is the only writer to the queue, so an acknowledged event cannot be stranded by a crash in the endpoint.',
+      runsOn: 'Relay on ECS → Aurora PostgreSQL → Amazon SQS',
+      participants: [
+        { id: 'relay', label: 'Relay', service: 'ECS Fargate' },
+        { id: 'db', label: 'Inbox table', service: 'Aurora PostgreSQL' },
+        { id: 'sqs', label: 'Work queue', service: 'SQS standard' },
+      ],
+      steps: [
+        {
+          from: 'relay',
+          to: 'db',
+          label: 'SELECT status=received LIMIT 100 FOR UPDATE SKIP LOCKED',
+          note: 'Two relay tasks can run side by side: each takes rows the other has not locked, so they never publish the same batch at once.',
+        },
+        {
+          from: 'relay',
+          to: 'sqs',
+          label: 'SendMessageBatch {eventId} × 10',
+          note: 'Messages carry only the event id. The payload stays in the inbox, which keeps messages far below the 256 KB limit and leaves one copy of the truth.',
+          style: 'async',
+        },
+        {
+          from: 'relay',
+          to: 'db',
+          label: 'UPDATE status=published, published_at=now()',
+          note: 'A crash between the send and this update publishes the batch again. That is the at-least-once side of the relay, and the processor’s status check absorbs it.',
+        },
+        {
+          from: 'relay',
+          to: 'db',
+          label: 'republish rows published over 3 h ago',
+          note: 'A message lost in a bad deploy would leave a row published forever; the sweep publishes it again. The deadline is longer than the worst expected backlog of about 70 minutes, and rows already marked failed are skipped, so dead letters stay dead until someone replays them.',
+        },
+      ],
+    },
+    {
+      id: 'process',
+      title: 'Apply the event',
+      kind: 'queue',
+      summary:
+        'A processor takes the message, fetches the current payment from the provider and writes the payment status, the ledger entries, an outbox row and the inbox status in one transaction.',
+      runsOn: 'Amazon SQS → processor on ECS Fargate → provider API → Aurora PostgreSQL',
+      participants: [
+        { id: 'sqs', label: 'Work queue', service: 'SQS standard' },
+        { id: 'proc', label: 'Processor', service: 'ECS Fargate' },
+        { id: 'api', label: 'Provider API', service: 'External' },
+        { id: 'db', label: 'Payments + ledger', service: 'Aurora PostgreSQL' },
+      ],
+      steps: [
+        {
+          from: 'sqs',
+          to: 'proc',
+          label: 'ReceiveMessage {eventId}',
+          note: 'The message becomes invisible for 60 s. If the processor dies, it reappears for another one.',
+          style: 'async',
+        },
+        {
+          from: 'proc',
+          to: 'db',
+          label: 'read inbox row',
+          note: 'Already processed means a duplicate delivery: delete the message and stop.',
+        },
+        {
+          from: 'proc',
+          to: 'api',
+          label: 'GET payment pi_123',
+          note: 'Money-changing events are applied from the current object, about 200 ms, so a late or reordered event cannot move the payment backwards. A 429 is retried with backoff and does not count against the dead-letter limit.',
+        },
+        {
+          from: 'proc',
+          to: 'db',
+          label: 'BEGIN; UPDATE payments SET paid WHERE status=pending',
+          note: 'The transition is a conditional update. Zero rows means another event already moved the payment, and nothing else in the transaction may assume this one won.',
+        },
+        {
+          from: 'proc',
+          to: 'db',
+          label: 'INSERT ledger, outbox; UPDATE inbox=processed; COMMIT',
+          note: 'Ledger entries have a unique key of provider object id plus entry type, so a second event or a reconciliation repair for the same money is refused. All of it commits together or not at all.',
+        },
+        {
+          from: 'proc',
+          to: 'sqs',
+          label: 'DeleteMessage',
+          note: 'Only after the commit. A crash between commit and delete redelivers a message whose row is already processed.',
+        },
+      ],
+    },
+    {
+      id: 'side-effects',
+      title: 'Send the receipt',
+      kind: 'async',
+      summary:
+        'Ana’s receipt is sent from the outbox row written in the same transaction, after the commit, with the outbox row id as the idempotency key.',
+      runsOn: 'Outbox worker on ECS → Aurora PostgreSQL → Amazon SES or the order service',
+      participants: [
+        { id: 'worker', label: 'Outbox worker', service: 'ECS Fargate' },
+        { id: 'db', label: 'Outbox table', service: 'Aurora PostgreSQL' },
+        { id: 'mail', label: 'Receipt sender', service: 'Amazon SES' },
+      ],
+      steps: [
+        {
+          from: 'worker',
+          to: 'db',
+          label: 'claim unsent rows FOR UPDATE SKIP LOCKED',
+          note: 'A row exists only if the payment transaction committed, so a rolled-back payment never produces a receipt.',
+        },
+        {
+          from: 'worker',
+          to: 'mail',
+          label: 'send receipt, key=outbox id',
+          note: 'At least once. Receivers that honor the key turn a resend into nothing; a plain email relay can deliver twice, which is the known gap.',
+          style: 'async',
+        },
+        {
+          from: 'worker',
+          to: 'db',
+          label: 'UPDATE outbox SET sent_at',
+          note: 'Failures keep the row unsent with an attempt count; past the limit it is flagged and alarmed, like a dead letter.',
+        },
+      ],
+    },
+    {
+      id: 'dead-letter',
+      title: 'Dead letter and replay',
+      kind: 'direct',
+      summary:
+        'A bug makes one event type fail every time. After five receives it lands in the dead-letter queue, someone is paged, a fix ships and the stored event is replayed.',
+      runsOn: 'Amazon SQS redrive → dead-letter queue → CloudWatch alarm → admin replay',
+      participants: [
+        { id: 'sqs', label: 'Work queue', service: 'SQS standard' },
+        { id: 'dlq', label: 'Dead letters', service: 'SQS' },
+        { id: 'oncall', label: 'On-call engineer', service: 'CloudWatch alarm' },
+        { id: 'admin', label: 'Admin API', service: 'ECS, IAM-protected' },
+        { id: 'db', label: 'Inbox table', service: 'Aurora PostgreSQL' },
+      ],
+      steps: [
+        {
+          from: 'sqs',
+          to: 'dlq',
+          label: 'maxReceiveCount 5 reached',
+          note: 'The redrive policy moves the message after five failed attempts. Rate-limit retries are not failures and are kept out of this count.',
+          style: 'async',
+        },
+        {
+          from: 'dlq',
+          to: 'oncall',
+          label: 'ApproximateNumberOfMessagesVisible > 0',
+          note: 'Every dead letter is money not recorded, so one is enough to page. On its last attempt the processor marked the inbox row failed with the error, so the relay sweep leaves it alone.',
+          style: 'async',
+        },
+        {
+          from: 'oncall',
+          to: 'admin',
+          label: 'POST /admin/events/{id}/replay',
+          note: 'After the fix is deployed. The call is authenticated, authorized for a small group and written to the audit log.',
+        },
+        {
+          from: 'admin',
+          to: 'db',
+          label: 'UPDATE inbox SET status=received',
+          note: 'The relay publishes it again like any new event. Replay is safe because every write in the handler is conditional or keyed.',
+        },
+      ],
+    },
+    {
+      id: 'reconcile',
+      title: 'Reconcile with the provider',
+      kind: 'scheduled',
+      summary:
+        'Every night a job lists yesterday’s payments and refunds from the provider, compares them with the ledger and repairs differences through the same processor.',
+      runsOn:
+        'EventBridge Scheduler → reconciliation task on ECS → provider API → Aurora PostgreSQL',
+      participants: [
+        { id: 'sched', label: 'Scheduler', service: 'EventBridge Scheduler' },
+        { id: 'job', label: 'Reconciliation', service: 'ECS task' },
+        { id: 'api', label: 'Provider API', service: 'External' },
+        { id: 'db', label: 'Ledger + inbox', service: 'Aurora PostgreSQL' },
+      ],
+      steps: [
+        {
+          from: 'sched',
+          to: 'job',
+          label: 'RunTask at 03:00',
+          note: 'An ECS task, not a Lambda: the run takes about 20 minutes and Lambda stops at 15.',
+          style: 'async',
+        },
+        {
+          from: 'job',
+          to: 'api',
+          label: 'list payments, refunds; 100 per page from cursor',
+          note: 'About 26K calls at 20 per second, leaving the rest of the provider limit to the processor. The cursor is saved, so a crashed run resumes.',
+        },
+        {
+          from: 'job',
+          to: 'db',
+          label: 'compare with ledger totals per payment',
+          note: 'Differences are a missed webhook, a stuck event or a bug. Each one is recorded in a report.',
+        },
+        {
+          from: 'job',
+          to: 'db',
+          label: 'INSERT inbox id=recon:pi_456:charge',
+          note: 'A repair is a synthetic event that goes through the normal processor. The ledger key stops it if the real webhook was applied in the meantime.',
+        },
+      ],
+    },
+  ],
   deepDives: [
     {
       question: 'How do we handle events that arrive out of order?',
@@ -318,6 +614,89 @@ export const paymentWebhooks: Design = {
       ],
       choice:
         'Keep them for a fixed window, longer than the provider retry window, with access restricted and a scheduled purge.',
+    },
+    {
+      question: 'How do we know a webhook is real, and who can read it?',
+      options: [
+        {
+          name: 'Allow only the provider’s published IP addresses',
+          pros: 'Cheap, and blocks most noise at the edge.',
+          cons: 'Proves where a request came from, not what it says; lists change, and it says nothing about replays.',
+        },
+        {
+          name: 'Trust the payload and fetch the object anyway',
+          pros: 'A forged event cannot set a wrong state, because the state comes from the provider API.',
+          cons: 'Anyone can flood the inbox and burn the provider rate limit with fake event ids.',
+        },
+        {
+          name: 'Signature over the raw body and a timestamp, with two secrets',
+          pros: 'Proves origin and integrity, the timestamp tolerance blocks replays, and accepting the current and previous secret lets the secret rotate with no downtime.',
+          cons: 'The raw body must be kept before parsing, and clocks must stay close to the provider’s.',
+        },
+      ],
+      choice:
+        'Verify the signature with a constant-time comparison before storing anything, keep the secrets in Secrets Manager, and put WAF in front for size and rate rules. Raw payloads carry customer names and emails, so they are encrypted with KMS, only the processor role can read them, and the replay API is limited to a small group and audited.',
+    },
+    {
+      question: 'How do we live within the provider’s API rate limit?',
+      options: [
+        {
+          name: 'Fetch the current object for every event',
+          pros: 'Simplest rule; order never matters.',
+          cons: 'At the sale-day peak it needs 600 calls a second against a limit of 100.',
+        },
+        {
+          name: 'One fetch per payment for all of its waiting events',
+          pros: 'A burst of events for one payment costs one call, and events that change no money skip the fetch.',
+          cons: 'The processor has to group messages by payment before calling.',
+        },
+        {
+          name: 'Apply from the payload; fetch only on conflict',
+          pros: 'Fetches become rare, so the limit stops setting the drain time.',
+          cons: 'The payload must be trusted for legal forward transitions, so the signature check carries more weight.',
+        },
+      ],
+      choice:
+        'One fetch per payment now, with a circuit breaker that pauses fetching handlers on repeated 429s. Applying from the payload and fetching only on conflict is the step taken at 10x, when post-spike lag would last hours.',
+    },
+    {
+      question: 'How should the ledger record money?',
+      options: [
+        {
+          name: 'A balance column updated in place',
+          pros: 'One row to read.',
+          cons: 'No history: a wrong update erases the evidence, and two updates can race.',
+        },
+        {
+          name: 'Amounts as decimals or floats',
+          pros: 'Natural to write.',
+          cons: 'Floats round, and currencies have different minor units.',
+        },
+        {
+          name: 'Immutable double-entry rows in integer minor units',
+          pros: 'Every movement has a debit and a credit that sum to zero, history is complete, and a balance is a sum anyone can recompute.',
+          cons: 'More rows, and balances need a query or a snapshot.',
+        },
+      ],
+      choice:
+        'Append-only double-entry rows in integer minor units with the currency on each row. A mistake is fixed with a reversing entry, never an update, and the unique key per provider object and entry type keeps the same money from being recorded twice.',
+    },
+    {
+      question: 'What changes with several regions?',
+      options: [
+        {
+          name: 'Active endpoints in two regions, each with its own database',
+          pros: 'Survives a region loss for ingestion.',
+          cons: 'The unique event id only deduplicates inside one database, so a redelivery that lands in the other region applies the money twice.',
+        },
+        {
+          name: 'One writing region, a standby region kept by replication',
+          pros: 'One inbox and one ledger keep deduplication exact; the standby can be promoted if the region is lost.',
+          cons: 'Promotion is a decision and takes minutes, and replication across regions is asynchronous.',
+        },
+      ],
+      choice:
+        'One writing region with Aurora Global Database as the standby. The provider retries for days, so a regional outage delays events instead of losing them; rows lost by asynchronous replication are found by reconciliation, and the ledger keys stop any that were applied twice.',
     },
   ],
   wrapUp:
@@ -416,6 +795,15 @@ export const paymentWebhooks: Design = {
         'These failures are retried with backoff and do not count toward the dead-letter limit, since the event is not at fault; a circuit breaker pauses the fetching handlers instead of burning attempts. When the API returns, the backlog drains at the rate limit. State is late, never wrong.',
     },
     {
+      scenario: 'A deploy breaks the handler for one event type, and every dispute event fails.',
+      impact:
+        'Hundreds of events dead-letter within minutes and each one pages. Other event types keep flowing, but disputes are not recorded.',
+      detection:
+        'The dead-letter alarm, grouped by event type, so a burst reads as one incident instead of hundreds of pages; the processor error rate per type points at the deploy.',
+      recovery:
+        'Roll back, or switch off that event type with a flag so the processor marks its rows failed without burning attempts. After the fix, one bulk replay sets every failed row of that type back to received and the relay republishes them at its normal pace. Nothing was lost, because the inbox kept every payload.',
+    },
+    {
       scenario:
         'Every webhook is rejected: a rotated signing secret was not deployed, or the endpoint is misrouted.',
       impact:
@@ -468,12 +856,164 @@ export const paymentWebhooks: Design = {
     ],
     implications: [
       'A peak 20 times the average is why the endpoint only stores and acknowledges: 2,000 single-row inserts per second fit one database primary, while 2,000 full handlers per second with an API call each do not fit anything.',
-      'The provider rate limit, not our hardware, sets the processing rate. Adding processors past about 50 concurrent handlers (20 fetches in flight, plus about 20 handlers for the events that need none) buys nothing, so the queue is sized to hold more than an hour of backlog and lag is an expected state with its own alarm threshold.',
+      'The provider rate limit, not our hardware, sets the processing rate. Adding processors past about 40 concurrent handlers (20 fetches in flight, plus about 20 handlers for the events that need none) buys nothing, so the queue is sized to hold more than an hour of backlog and lag is an expected state with its own alarm threshold.',
       'Because the backlog is bounded by a limit we do not control, fetches are worth saving: one fetch per payment serves all of its events that are waiting, and events that change no money skip it.',
       'Half a terabyte of payloads in the transactional database is why the inbox is partitioned by day: the purge becomes dropping a partition instead of deleting 8.6 million rows.',
       'Reconciliation shares the API limit with the processor, so it runs off peak under its own budget of about 20 calls per second and must be resumable from a cursor.',
     ],
   },
+  infrastructure: {
+    provider: 'AWS',
+    intro:
+      'One concrete way to run this design on AWS, in one region across three Availability Zones. The services below are examples that fit, not the only option.',
+    items: [
+      {
+        part: 'Webhook endpoint',
+        service: 'AWS WAF on an Application Load Balancer, Amazon ECS on AWS Fargate',
+        why: 'A small stateless service that verifies, inserts and answers; WAF adds body-size and rate rules in front, and tasks scale on request count.',
+        watch:
+          'ALB TargetResponseTime and HTTPCode_Target_5XX_Count on /webhooks, and a custom count of signature failures.',
+      },
+      {
+        part: 'Inbox, payments, ledger and outbox',
+        service:
+          'Amazon Aurora PostgreSQL with a replica in another zone; the inbox partitioned by day',
+        why: 'One database gives the unique event id, conditional updates and the single transaction across all four tables. Aurora acknowledges a commit only after it is written across three zones, which is what makes the 2xx safe.',
+        watch:
+          'CommitLatency, DatabaseConnections, Deadlocks and CPUUtilization on the writer, and the failover event.',
+      },
+      {
+        part: 'Relay',
+        service: 'Two Amazon ECS tasks polling the inbox with SKIP LOCKED',
+        why: 'The only path from the inbox to the queue, so the endpoint never makes a second write.',
+        watch: 'A custom metric of the age of the oldest received row, the relay’s own lag.',
+      },
+      {
+        part: 'Work queue',
+        service:
+          'Amazon SQS standard queue, 60 s visibility timeout, redrive to a dead-letter queue after 5 receives',
+        why: 'Retries, backoff and buffering for a backlog of hundreds of thousands of events with no servers to run. Duplicates and reordering are already harmless here, so a FIFO queue buys nothing.',
+        watch:
+          'ApproximateAgeOfOldestMessage, ApproximateNumberOfMessagesVisible, and NumberOfMessagesReceived against NumberOfMessagesDeleted.',
+      },
+      {
+        part: 'Processor',
+        service:
+          'Amazon ECS on Fargate, scaling on queue depth, capped at about 40 concurrent handlers',
+        why: 'The provider limit sets the useful concurrency, so the cap keeps extra tasks from only collecting 429s.',
+        watch:
+          'Custom metrics: provider fetch latency, 429 rate, circuit breaker state, and refused backward transitions.',
+      },
+      {
+        part: 'Dead letters',
+        service: 'Amazon SQS dead-letter queue with a CloudWatch alarm',
+        why: 'Every event that cannot be applied becomes visible and paged instead of retried forever.',
+        watch: 'ApproximateNumberOfMessagesVisible, which should be zero.',
+      },
+      {
+        part: 'Side effects',
+        service: 'An outbox worker on Amazon ECS sending through Amazon SES and internal services',
+        why: 'Receipts and order updates leave only after the commit, keyed by the outbox row id.',
+        watch: 'A custom age of the oldest unsent outbox row; SES Bounce and Reject counts.',
+      },
+      {
+        part: 'Reconciliation',
+        service: 'Amazon EventBridge Scheduler starting an Amazon ECS task every night',
+        why: 'A run of about 20 minutes is past Lambda’s 15-minute limit, and the task resumes from a saved cursor.',
+        watch:
+          'Custom metrics: differences found, run duration, and the time of the last successful run.',
+      },
+      {
+        part: 'Security',
+        service: 'AWS Secrets Manager, AWS KMS, IAM roles per service, AWS CloudTrail',
+        why: 'Signing secrets with a current and a previous version for rotation, payloads encrypted at rest, each service limited to its own tables and queues, and every replay and secret read logged.',
+        watch:
+          'Secrets Manager errors on refresh, CloudTrail events for the replay API and secret reads, WAF BlockedRequests.',
+      },
+      {
+        part: 'Observability and cost',
+        service: 'Amazon CloudWatch dashboards and alarms, AWS Cost Explorer',
+        why: 'One dashboard with the SLOs. The bill is small next to the money it protects: mostly Aurora and its storage of about half a terabyte of payloads.',
+        watch: 'The SLO dashboard, and Aurora storage growth against the daily partition drop.',
+      },
+    ],
+    limits: [
+      'An SQS message is at most 256 KB, so it carries the event id and the payload stays in the inbox.',
+      'The SQS visibility timeout goes up to 12 hours; 60 s is set well above a handler of about 200 ms, so a slow fetch does not release a message to a second processor.',
+      'SQS keeps a message for at most 14 days, far longer than the worst backlog, and the inbox remains the record anyway.',
+      'A standard SQS queue delivers at least once and does not keep order, which the design already assumes.',
+      'Lambda stops at 15 minutes, so the 20-minute reconciliation runs as an ECS task.',
+      'An Aurora failover takes tens of seconds, during which the endpoint answers 5xx and the provider retries.',
+      'AWS WAF attaches to an Application Load Balancer, not to a Network Load Balancer, which is one reason for the ALB.',
+      'EventBridge Scheduler runs at most once a minute, enough for the incremental reconciliation every few minutes at 10x.',
+    ],
+  },
+  slos: [
+    {
+      objective: 'Ingestion',
+      target: '99.95% of validly signed webhooks answered 2xx within 1 s',
+      measure: 'ALB TargetResponseTime and 5XX on /webhooks, excluding 401s for bad signatures.',
+    },
+    {
+      objective: 'Processing lag',
+      target:
+        '99% of events applied within 2 min outside sale peaks; a peak backlog drained within 2 h',
+      measure: 'processed_at minus received_at on each inbox row.',
+    },
+    {
+      objective: 'Ledger correctness',
+      target: 'No difference with the provider survives one reconciliation run',
+      measure: 'The nightly reconciliation report: differences found, repaired, and still open.',
+    },
+    {
+      objective: 'Dead letters',
+      target: 'Every dead letter triaged within 4 hours',
+      measure: 'Age of the oldest message in the dead-letter queue.',
+    },
+  ],
+  alarms: [
+    {
+      name: 'Events not being applied',
+      metric:
+        'Custom: oldest unprocessed inbox row older than 5 min, or older than 90 min during a peak',
+      meaning:
+        'The relay stalled, processors are down, or the provider limit is holding the drain; one metric covers all three because it is measured on the inbox.',
+    },
+    {
+      name: 'Silence',
+      metric: 'Custom: zero inbox inserts for 15 min during hours with expected traffic',
+      meaning:
+        'A rotated secret not deployed, a DNS or routing change, or the provider disabled the endpoint. Every queue looks healthy, so only an absence alarm catches it.',
+    },
+    {
+      name: 'Signature failures',
+      metric: 'Custom: signature failures above 1% of webhook requests for 5 min',
+      meaning: 'A secret mismatch after rotation, clock drift, or someone probing the endpoint.',
+    },
+    {
+      name: 'Dead letter',
+      metric: 'SQS ApproximateNumberOfMessagesVisible above 0 on the dead-letter queue',
+      meaning:
+        'An event cannot be applied and money is not recorded until someone fixes and replays it.',
+    },
+    {
+      name: 'Provider rate limiting',
+      metric: 'Custom: 429 responses above 5% of fetches, or the circuit breaker open for 5 min',
+      meaning:
+        'Processing is paused by the provider; check that reconciliation is not running at peak and expect lag.',
+    },
+    {
+      name: 'Reconciliation',
+      metric: 'Custom: open differences above 0, or no successful run in 26 hours',
+      meaning: 'Something was missed or applied wrongly, or the backstop itself stopped running.',
+    },
+    {
+      name: 'Endpoint errors',
+      metric: 'ALB HTTPCode_Target_5XX_Count above 1% of webhook requests for 2 min',
+      meaning:
+        'Usually the database: a failover or connection exhaustion. Events are not lost, but the provider retry wave follows.',
+    },
+  ],
   evolution: {
     mvp: 'No queue and no separate relay. The endpoint verifies, inserts into the inbox and answers; one worker polls the inbox, claims rows with a lock that skips rows already taken, and applies each in one transaction with the state machine. A failed row gets an attempt count and, past a limit, a failed status that raises an alert. The outbox lives in the same database. The unique event id, the conditional transitions, the ledger keys and the daily reconciliation are there from the first version, because they are the correctness of the system and cannot be added after money has been recorded wrongly.',
     atScale: [
