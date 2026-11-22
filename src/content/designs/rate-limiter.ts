@@ -19,7 +19,7 @@ export const rateLimiter: Design = {
       'Low overhead: a few milliseconds at most added to each request.',
       'Highly available: the limiter failing must not take the API down.',
       'Accurate across many gateway instances, not just per instance.',
-      'Scale to hundreds of thousands of requests per second and millions of clients, and grow by adding nodes.',
+      'Scale to hundreds of thousands of requests per second and about a million clients, and grow by adding nodes.',
       'Hard to cheat: the identity used for a bucket comes from authentication or a trusted proxy, never from a header the client controls, and rules change only through a reviewed, audited rollout.',
     ],
     outOfScope: [
@@ -170,9 +170,9 @@ export const rateLimiter: Design = {
       {
         title: 'Load the rules',
         narration:
-          'Rules are kept in memory on each gateway and refreshed from a config store every few seconds.',
+          'Rules are kept in memory on each gateway and refreshed from a config store every 15 to 45 seconds.',
         tradeoff:
-          'Reading rules from memory adds no latency, but a change takes a few seconds to reach every gateway. Reading them on every request would always be fresh and would put another dependency in the hot path.',
+          'Reading rules from memory adds no latency, but a change takes under a minute to reach a gateway. Reading them on every request would always be fresh and would put another dependency in the hot path.',
         nodes: ['rules', 'limiter'],
         travel: [['rules', 'limiter']],
         short: 'Rules',
@@ -236,7 +236,7 @@ export const rateLimiter: Design = {
       {
         title: 'Over the limit: 429',
         narration:
-          'With no token left, the gateway answers 429 Too Many Requests with a Retry-After header, and the backend never sees the request. The gateway also remembers the client as denied until that time and answers its next requests itself, so a client hammering at thousands of requests a second costs the store one call, not thousands.',
+          'With no token left, the gateway answers 429 Too Many Requests with a Retry-After header, and the backend never sees the request. The gateway also remembers the denial until that time, keyed by client and rule, and answers the matching requests itself, so a client hammering at thousands of requests a second costs the store one call per gateway per retry interval, not thousands a second.',
         tradeoff:
           'Rejecting fast protects the backend but pushes work back to the client. Telling it exactly when to retry, and documenting jittered retries, avoids a crowd of clients retrying at the same instant. The local denied-until cache protects the store: without it, every rejected request is still a script call on one shard, which is how a single abusive client can saturate it.',
         nodes: ['limiter', 'reject'],
@@ -254,7 +254,7 @@ export const rateLimiter: Design = {
       {
         title: 'When Redis is down',
         narration:
-          'If the store does not answer within a short timeout, the limiter lets the request through, falls back to a per-gateway bucket of a tenth of the plan limit and raises an alarm. A normal client spread over 30 gateways sends each one about a thirtieth of its traffic, so the fallback never rejects it; a runaway client is held to at most 3 times its limit across the fleet.',
+          'If the store does not answer within a short timeout, the limiter lets the request through, falls back to a per-gateway bucket of a tenth of the plan limit and raises an alarm. A normal client spread over 30 gateways sends each one about a thirtieth of its traffic, so the fallback rarely rejects it; a runaway client is held to at most 3 times its limit across the fleet.',
         tradeoff:
           'Failing open keeps the product available but removes protection for a while. Failing closed protects the backends but turns a cache outage into a full outage. For most APIs, availability wins and the local fallback limits the damage.',
         nodes: ['limiter', 'store', 'backend'],
@@ -340,8 +340,8 @@ export const rateLimiter: Design = {
       title: 'A client over its limit',
       kind: 'sync',
       summary:
-        'A partner’s broken retry loop sends 3,000 requests a second against a limit of 100 a minute. The first denial costs one script call; the rest are answered from the gateway’s memory.',
-      runsOn: 'Gateway on ECS → ElastiCache once → local denied-until cache',
+        'A partner’s broken retry loop sends 3,000 requests a second against a limit of 100 a minute. On each gateway the first denial costs one script call; the rest are answered from that gateway’s memory until the retry time.',
+      runsOn: 'Gateway on ECS → ElastiCache once per gateway → local denied-until cache',
       participants: [
         { id: 'bot', label: 'Partner’s script', service: 'Client' },
         { id: 'gw', label: 'Gateway + limiter', service: 'ECS Fargate' },
@@ -370,8 +370,8 @@ export const rateLimiter: Design = {
         {
           from: 'gw',
           to: 'gw',
-          label: 'remember p7 denied until +0.6 s',
-          note: 'Until then every gateway that saw the denial answers 429 itself. Without this, each of the 3,000 rejected requests a second would still cost a script call and could saturate the shard.',
+          label: 'remember p7 plan rule denied until +0.6 s',
+          note: 'Until then this gateway answers 429 itself. The entry is keyed by client and rule: an empty plan bucket covers every request of the client, an empty endpoint bucket only that endpoint. The cache is per gateway, so each of the 30 gateways pays its own call: about 30 calls per 0.6 s instead of 3,000 a second, which could saturate the shard.',
         },
         {
           from: 'gw',
@@ -407,7 +407,7 @@ export const rateLimiter: Design = {
           from: 'gw',
           to: 'gw',
           label: 'breaker open; take from local fallback bucket',
-          note: 'Each gateway allows a tenth of the plan limit. A normal client reaches each gateway with about a thirtieth of its traffic, so it is never rejected; a runaway client gets at most 30 × a tenth, 3 times its limit.',
+          note: 'Each gateway allows a tenth of the plan limit. A normal client reaches each gateway with about a thirtieth of its traffic, so it is rarely rejected; a runaway client gets at most 30 × a tenth, 3 times its limit.',
         },
         {
           from: 'gw',
@@ -455,7 +455,7 @@ export const rateLimiter: Design = {
           from: 'cfg',
           to: 'gw',
           label: 'deploy to 10% of gateways, then the rest',
-          note: 'Each gateway’s agent polls every few seconds and swaps its in-memory snapshot. Old and new versions run side by side during the rollout.',
+          note: 'Each gateway’s agent polls every 15 to 45 seconds and swaps its in-memory snapshot, so a gateway picks up its step in under a minute. Old and new versions run side by side during the rollout.',
           style: 'async',
         },
         {
@@ -512,7 +512,7 @@ export const rateLimiter: Design = {
           from: 'gw',
           to: 'shares',
           label: 'refresh overrides every few seconds',
-          note: 'Gateways pass the region’s share as the bucket’s rate and capacity to the script. Buckets keep their tokens and refill at the new rate.',
+          note: 'Gateways pass the region’s share as the bucket’s rate and capacity to the script. Buckets keep their tokens, capped at the new capacity, and refill at the new rate.',
         },
       ],
     },
@@ -669,7 +669,7 @@ export const rateLimiter: Design = {
       {
         property: 'Check semantics',
         promise:
-          'A check runs at most once per request. The limiter never retries a check that timed out; it fails open instead, so a lost reply costs the client one token at worst and never blocks the request.',
+          'A check runs at most once per request. The limiter never retries a check that timed out; it fails open instead, so a lost reply costs the client one token at worst and never blocks the request on the store.',
       },
       {
         property: 'Availability',
@@ -687,13 +687,13 @@ export const rateLimiter: Design = {
       'Every bucket of a client maps to the same hash slot, and the script reads the time from the Redis node, never from the gateway.',
       'A token bucket is soft state. A full bucket is a safe value to restart from, so nothing is persisted or replicated synchronously.',
       'Backends keep some headroom and their own load shedding, because the limiter fails open.',
-      'Gateways hold a rule snapshot that is at most a few seconds old.',
+      'Gateways hold a rule snapshot that is under a minute old.',
     ],
     doesNotGuarantee: [
       'An exact count through a failover. Replication is asynchronous, so a promoted replica can miss the latest decrements; each client gains at most one bucket capacity per failover.',
       'Any shared limit while the store is unreachable. The fallback counts per gateway, so a client spread over the fleet can get up to the fallback limit multiplied by the number of gateways: with 30 gateways and a fallback of a tenth, 3 times its limit.',
       'One exact global limit across regions. Each region enforces its share, so a client can be capped below its global limit until shares are rebalanced.',
-      'That a rule change applies at once. It reaches every gateway within the refresh interval, a few seconds.',
+      'That a rule change applies at once. It reaches each gateway within the refresh interval, under a minute, and every gateway only when the staged rollout completes.',
       'Queueing or ordering of rejected requests. A 429 is final for that request and the client decides when to retry.',
     ],
   },
@@ -734,17 +734,17 @@ export const rateLimiter: Design = {
       detection:
         'CPU and operations per second per shard, p99 check latency per shard, and the share of 429s by client.',
       recovery:
-        'When a check is denied, the gateway remembers the client as denied until the reset time and answers 429 locally without calling the store. The local pre-limit caps what any one client can send to the store. The shard returns to normal load; the bucket state was never wrong.',
+        'When a check is denied, the gateway remembers the client and rule as denied until the reset time and answers 429 locally without calling the store, so the flood costs one call per gateway per retry interval. The local pre-limit caps what any one client can send to the store. The shard returns to normal load; the bucket state was never wrong.',
     },
     {
       scenario:
-        'The config store is down, or a wrong rule is published (for example a limit of zero).',
+        'The config store is down, or a wrong rule is published (for example a limit ten times too low, which the validator cannot tell from an intended one).',
       impact:
-        'With the config store down, gateways keep enforcing the last snapshot and rule changes do not apply. With a wrong rule, legitimate clients get 429s within seconds, on every gateway.',
+        'With the config store down, gateways keep enforcing the last snapshot and rule changes do not apply. With a wrong rule, legitimate clients get 429s on the first 10% of gateways, within a minute of that step, until the alarm rolls the deployment back; on every gateway only if the rule gets past that first step.',
       detection:
         'The age of the rule snapshot per gateway, and an alarm on the 429 rate per rule compared with its baseline.',
       recovery:
-        'Rules are versioned, so the fix is to publish the previous version; gateways pick it up on the next refresh. Buckets need no cleanup, since a larger limit simply refills them. Validating rules and rolling them out to a few gateways first keeps this rare.',
+        'Rules are versioned: the Bad rule alarm rolls the deployment back to the previous version, or an engineer deploys it if the rollout had already finished, and gateways pick it up on the next refresh. Buckets need no cleanup, since a larger limit simply refills them. Validating rules and rolling them out to a few gateways first keeps the damage small.',
     },
     {
       scenario:
@@ -754,7 +754,7 @@ export const rateLimiter: Design = {
       detection:
         'The 429 rate per region and client next to the regional health signal, and the gap between a client’s global limit and its admitted rate.',
       recovery:
-        'The rebalancer moves the failed region’s shares to the regions now receiving the traffic. Buckets there start from the new share. When the region returns, shares move back over a few refresh cycles.',
+        'The rebalancer moves the failed region’s shares to the regions now receiving the traffic. Buckets there keep their tokens and refill at the new, larger rate. When the region returns, shares move back over a few refresh cycles.',
     },
   ],
   capacity: {
@@ -873,6 +873,7 @@ export const rateLimiter: Design = {
       'API Gateway usage plans are best effort, and the account-level throttle is 10,000 requests a second per region by default.',
       'WAF rate-based rules count over a window of minutes and take time to start blocking, so they cannot enforce a limit per second.',
       'EventBridge Scheduler runs at most once a minute, the pace of the share rebalancer.',
+      'The AppConfig agent polls every 45 seconds by default and AppConfig allows no less than 15 seconds between polls, so a rule change reaches a gateway in under a minute, never at once.',
     ],
   },
   slos: [
@@ -912,8 +913,9 @@ export const rateLimiter: Design = {
     },
     {
       name: 'Slow checks',
-      metric: 'Custom: check latency p99 above 5 ms',
-      meaning: 'The store is saturated or far away; every request is paying for it.',
+      metric: 'Custom: check latency p99 above 2 ms for 5 min',
+      meaning:
+        'The Overhead SLO is being missed: the store is saturated or far away, and every request is paying for it. The threshold sits below the 5 ms timeout, which caps what a check can take.',
     },
     {
       name: 'Bad rule',
