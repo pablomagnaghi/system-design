@@ -21,7 +21,7 @@ const { design } = Astro.props;
 const others = relatedAfter(designs, design.slug);
 ---
 
-<BaseLayout title={design.title} description={design.summary}>
+<BaseLayout title={design.title} description={design.summary} width="960px">
   <article class="container">
     <a href="/#designs" class="back">
       ← All designs
