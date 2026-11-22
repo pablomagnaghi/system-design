@@ -19,8 +19,15 @@ export const videoStreaming: Design = {
       'Views outnumber uploads by thousands to one (about 4 billion plays and 2 million uploads a day); popular videos are watched millions of times.',
       'Originals are not lost once an upload completes: complete is acknowledged only after storage holds the assembled file in several zones.',
       'A typical upload is ready to watch within minutes.',
+      'Only signed-in creators upload, through signed URLs that expire within hours; every uploaded file is treated as hostile input, so decoding runs isolated; viewers can fetch only published videos.',
     ],
-    outOfScope: ['Live streaming.', 'Recommendations, search and comments.'],
+    outOfScope: [
+      'Live streaming, which needs a different ingest and segments produced in real time.',
+      'Recommendations, search and comments.',
+      'Content moderation and copyright matching, which would read the originals in a separate pipeline and call a takedown.',
+      'Private and paid videos with DRM; the design serves public videos with plain cacheable URLs.',
+      'Captions, thumbnails chosen by models, and ad insertion.',
+    ],
   },
   entities: [
     {
@@ -101,8 +108,8 @@ export const videoStreaming: Design = {
         id: 'segments',
         title: 'Segment storage',
         detail: 'Every rendition',
-        column: 4,
-        row: 'middle',
+        column: 5,
+        row: 'bottom',
         appearsAt: 4,
       },
       {
@@ -111,7 +118,7 @@ export const videoStreaming: Design = {
         detail: 'Adaptive player',
         column: 0,
         row: 'bottom',
-        appearsAt: 6,
+        appearsAt: 7,
       },
       {
         id: 'cdn',
@@ -119,22 +126,33 @@ export const videoStreaming: Design = {
         detail: 'Edge caches',
         column: 4,
         row: 'bottom',
-        appearsAt: 8,
+        appearsAt: 9,
+      },
+      {
+        id: 'sweeper',
+        title: 'Sweeper',
+        detail: 'Finds stuck videos',
+        column: 5,
+        row: 'top',
+        appearsAt: 6,
       },
     ],
     edges: [
-      ['creator', 'api', 'start'],
+      ['creator', 'api'],
       ['api', 'meta'],
       ['creator', 'raw', 'parts'],
-      ['raw', 'queue', 'complete'],
+      ['raw', 'queue'],
       ['queue', 'transcode'],
       ['transcode', 'packager'],
       ['packager', 'segments'],
       ['packager', 'meta', 'ready'],
-      ['viewer', 'api', 'metadata'],
+      ['viewer', 'api'],
       ['viewer', 'cdn', 'segments'],
       ['cdn', 'segments', 'miss'],
+      ['viewer', 'segments'],
+      ['sweeper', 'meta'],
     ],
+    edgeStages: [{ edge: ['viewer', 'segments'], stages: [8] }],
     stages: [
       {
         title: 'Start an upload',
@@ -144,7 +162,7 @@ export const videoStreaming: Design = {
           'Signed URLs let the file bypass our servers entirely, so API servers never hold gigabytes in memory or tie up connections for minutes. The cost is that the API must trust storage events to know what arrived, and the URLs must expire quickly.',
         nodes: ['creator', 'api', 'meta'],
         travel: [
-          ['creator', 'api', 'start'],
+          ['creator', 'api'],
           ['api', 'meta'],
         ],
         short: 'Start upload',
@@ -169,8 +187,12 @@ export const videoStreaming: Design = {
           'When every part is in, the app calls complete with the list of parts and their checksums. The API asks storage to assemble the original file, which storage only does on that explicit request, and storage emits an event once the file exists. The event queues a processing job and the status moves to "processing".',
         tradeoff:
           'A durable queue between upload and processing absorbs bursts of uploads and survives worker crashes. It adds a little delay before work starts, which is small next to the minutes transcoding takes.',
-        nodes: ['raw', 'queue'],
-        travel: [['raw', 'queue', 'complete']],
+        nodes: ['creator', 'api', 'meta', 'raw', 'queue'],
+        travel: [
+          ['creator', 'api'],
+          ['api', 'meta'],
+          ['raw', 'queue'],
+        ],
         short: 'Queue job',
         metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
         load: { raw: 40, queue: 25 },
@@ -178,9 +200,9 @@ export const videoStreaming: Design = {
       {
         title: 'Split and transcode in parallel',
         narration:
-          'The job splits the original into chunks of a few seconds at keyframes. Many transcoders each take a chunk and encode it into every rung of the quality ladder, from low resolution to high.',
+          'The job splits the original into chunks of a few seconds at keyframes. Many transcoders each take a chunk and encode it into every rung of the base ladder of four, from low resolution to high; higher resolutions are added only once a video passes a view threshold. They run on Spot instances, which are cheap but can be reclaimed, and in an isolated network, because an uploaded file can be crafted to attack a decoder.',
         tradeoff:
-          'Transcoding a long video on one machine can take longer than the video itself. Chunks spread the work across hundreds of machines so even long videos are ready in minutes, at the cost of an orchestrator that tracks every chunk and retries failures.',
+          'Transcoding a long video on one machine can take longer than the video itself. Chunks spread the work across hundreds of machines so even long videos are ready in minutes, at the cost of an orchestrator that tracks every chunk and retries failures. Chunks of a few seconds are also what make Spot safe: a reclaimed instance loses one small task, not an hour of encoding.',
         nodes: ['queue', 'transcode'],
         travel: [['queue', 'transcode']],
         short: 'Transcode',
@@ -191,7 +213,7 @@ export const videoStreaming: Design = {
       {
         title: 'Package segments and manifests',
         narration:
-          'The packager cuts each rendition into segments of a few seconds in a standard adaptive streaming format, writes them to segment storage and writes a manifest that lists every rendition.',
+          'The packager cuts each rendition into segments of a few seconds in CMAF, which HLS and DASH players both read, writes them to segment storage and writes a manifest that lists every rendition.',
         tradeoff:
           'Small segments let the player switch quality often and start fast, but mean many more files and requests. A few seconds per segment is the usual balance. Storing the full ladder adds roughly the size of the original again, because each rung is encoded at a much lower bitrate than the source.',
         nodes: ['transcode', 'packager', 'segments'],
@@ -216,6 +238,18 @@ export const videoStreaming: Design = {
         load: { packager: 20, meta: 15 },
       },
       {
+        title: 'Sweep for stuck videos',
+        narration:
+          'Every five minutes a sweeper looks for videos that are not moving: complete was called but no job exists, or processing has made no progress for fifteen minutes. If the original is in storage and the last workflow has ended, it queues the video again.',
+        tradeoff:
+          'Storage events arrive at least once but can, rarely, go missing, and the API can crash between complete and recording the new status. Without a sweeper such a video waits forever. The sweeper adds a small job and a query every few minutes, and a repeated job is harmless because every output key is deterministic.',
+        nodes: ['sweeper', 'meta'],
+        travel: [['sweeper', 'meta']],
+        short: 'Sweeper',
+        metrics: { users: '20M', requestsPerSecond: '2K', p95Latency: '120 ms', errorRate: '0%' },
+        load: { sweeper: 10, meta: 15 },
+      },
+      {
         title: 'A viewer presses play',
         narration:
           'The player asks the video API for the video’s metadata and receives its title, status and manifest URL.',
@@ -223,7 +257,7 @@ export const videoStreaming: Design = {
           'Metadata is small and read far more than it is written, so it is cached heavily and served from read replicas. Keeping metadata separate from the media means a database hiccup never touches the bytes already flowing from the CDN.',
         nodes: ['viewer', 'api', 'meta'],
         travel: [
-          ['viewer', 'api', 'metadata'],
+          ['viewer', 'api'],
           ['api', 'meta'],
         ],
         short: 'Press play',
@@ -237,7 +271,7 @@ export const videoStreaming: Design = {
         tradeoff:
           'More bandwidth in one region does not shorten the distance to viewers on other continents, and paying for origin traffic on every view of the same popular segments is wasteful. The same few segments are watched over and over, which is exactly what edge caches are for.',
         nodes: ['viewer', 'segments'],
-        travel: [],
+        travel: [['viewer', 'segments']],
         short: 'Storage melts',
         metrics: {
           users: '20M',
@@ -247,6 +281,7 @@ export const videoStreaming: Design = {
           alerts: ['p95Latency', 'errorRate'],
         },
         load: { segments: 98 },
+        traffic: [{ edge: ['viewer', 'segments'], kind: 'failed' }],
       },
       {
         title: 'Stream segments from the CDN',
@@ -274,6 +309,300 @@ export const videoStreaming: Design = {
       },
     ],
   },
+  flows: [
+    {
+      id: 'upload',
+      title: 'Upload a video',
+      kind: 'sync',
+      summary:
+        'Carla uploads a 2 GB video from her laptop. The API only hands out signed URLs; the bytes go in parts straight to S3, and complete is one call at the end.',
+      runsOn: 'API on ECS → Aurora → S3 multipart upload with presigned URLs',
+      participants: [
+        { id: 'app', label: 'Carla’s app', service: 'Client' },
+        { id: 'api', label: 'Video API', service: 'ECS Fargate + Cognito' },
+        { id: 'db', label: 'Metadata', service: 'Aurora PostgreSQL' },
+        { id: 's3', label: 'Raw storage', service: 'S3' },
+      ],
+      steps: [
+        {
+          from: 'app',
+          to: 'api',
+          label: 'POST /videos {title, size 2 GB}',
+          note: 'Only a signed-in creator, with a per-creator upload limit. The size picks the part count: 2 GB in parts of 16 MB is 128 parts.',
+        },
+        {
+          from: 'api',
+          to: 'db',
+          label: 'INSERT video v91, status uploading',
+          note: 'The video id is created here and every later key is derived from it.',
+        },
+        {
+          from: 'api',
+          to: 's3',
+          label: 'CreateMultipartUpload raw/v91',
+          note: 'Returns an upload id. The API then signs one URL per part, valid for a few hours.',
+        },
+        {
+          from: 'app',
+          to: 's3',
+          label: 'PUT part 1..128 with checksum, 4 at a time',
+          note: 'S3 rejects a part whose checksum does not match. After a dropped connection the app lists the parts that arrived and sends only the rest.',
+        },
+        {
+          from: 'app',
+          to: 'api',
+          label: 'POST /videos/v91/complete {parts, checksums}',
+          note: 'Keyed by the video id, so a retry after a timeout returns the same answer and never creates a second video.',
+        },
+        {
+          from: 'api',
+          to: 's3',
+          label: 'CompleteMultipartUpload',
+          note: 'S3 assembles the original only on this explicit call and returns once it is stored across zones. Then the API answers Carla, and status moves to processing.',
+        },
+      ],
+    },
+    {
+      id: 'process',
+      title: 'Process the upload',
+      kind: 'queue',
+      summary:
+        'The new original triggers a workflow that splits it into chunks, transcodes every chunk into every rung on Spot instances, packages segments and manifests, and flips the video to ready once.',
+      runsOn: 'S3 event → EventBridge → SQS → Step Functions → AWS Batch on EC2 Spot → S3 → Aurora',
+      participants: [
+        { id: 's3raw', label: 'Raw storage', service: 'S3 + EventBridge' },
+        { id: 'sqs', label: 'Job queue', service: 'SQS' },
+        { id: 'sfn', label: 'Orchestrator', service: 'Step Functions' },
+        { id: 'enc', label: 'Transcoders', service: 'AWS Batch, EC2 Spot' },
+        { id: 'seg', label: 'Segment storage', service: 'S3' },
+        { id: 'db', label: 'Metadata', service: 'Aurora PostgreSQL' },
+      ],
+      steps: [
+        {
+          from: 's3raw',
+          to: 'sqs',
+          label: 'Object Created raw/v91',
+          note: 'Delivered at least once, usually within seconds. The queue buffers a burst of uploads.',
+          style: 'async',
+        },
+        {
+          from: 'sqs',
+          to: 'sfn',
+          label: 'StartExecution name=v91-enc3-1',
+          note: 'A small Lambda reads the queue and starts the workflow. The execution name is the video id, the encoding version and the attempt. A duplicate event tries to start the same name and is refused, so a repeated event never starts a second workflow.',
+        },
+        {
+          from: 'sfn',
+          to: 'enc',
+          label: 'split at keyframes → 50 chunks × 4 rungs',
+          note: 'A 200-second video becomes 50 chunks of 4 s. Each chunk and rung is one small task, so 200 tasks run in parallel and a Spot interruption loses only one of them.',
+        },
+        {
+          from: 'enc',
+          to: 'seg',
+          label: 'PUT v91/enc3/720p/chunk-017',
+          note: 'Deterministic keys: a retried task overwrites the same object with an equivalent one. Transcoders run with no internet access, because a crafted file can attack a decoder.',
+        },
+        {
+          from: 'sfn',
+          to: 'seg',
+          label: 'package: segments + master.m3u8',
+          note: 'Segments and manifests go under a versioned path and are never modified, so the CDN can cache them for a long time.',
+        },
+        {
+          from: 'sfn',
+          to: 'db',
+          label: 'UPDATE status=ready WHERE status=processing',
+          note: 'The only path to ready, after every object exists. A repeated publish matches no row and changes nothing.',
+        },
+      ],
+    },
+    {
+      id: 'play',
+      title: 'Press play',
+      kind: 'sync',
+      summary:
+        'Bruno opens the video. One small API call returns the manifest URL; every byte after that comes from the nearest CloudFront edge, and the player picks a rung for each next segment.',
+      runsOn: 'API on ECS → ElastiCache / Aurora replica, then CloudFront edges',
+      participants: [
+        { id: 'player', label: 'Bruno’s player', service: 'Client' },
+        { id: 'api', label: 'Video API', service: 'ECS Fargate' },
+        { id: 'cache', label: 'Metadata cache', service: 'ElastiCache' },
+        { id: 'edge', label: 'Edge', service: 'CloudFront' },
+      ],
+      steps: [
+        {
+          from: 'player',
+          to: 'api',
+          label: 'GET /videos/v91',
+          note: '200K of these a second at peak; each is about a kilobyte.',
+        },
+        {
+          from: 'api',
+          to: 'cache',
+          label: 'GET video:v91 (replica on a miss)',
+          note: 'Metadata is read about 2,000 times per write, so the primary never sees plays.',
+        },
+        {
+          from: 'api',
+          to: 'player',
+          label: '{title, status ready, manifest URL}',
+          note: 'From here on the API is out of the path: an API outage does not stop a video that is already playing.',
+          style: 'reply',
+        },
+        {
+          from: 'player',
+          to: 'edge',
+          label: 'GET master.m3u8, then 360p seg 1-2',
+          note: 'Starts on a low rung so the first frame appears in about two seconds.',
+        },
+        {
+          from: 'player',
+          to: 'player',
+          label: 'buffer 12 s, throughput 8 Mbps → 1080p',
+          note: 'Adaptive bitrate: the player measures each download and its buffer, and steps up or down for the next 4-second segment.',
+        },
+        {
+          from: 'player',
+          to: 'edge',
+          label: 'GET 1080p seg 3, 4, …',
+          note: 'About one request every 4 s per viewer, 1M requests a second at the peak, 95% answered from the edge cache.',
+        },
+      ],
+    },
+    {
+      id: 'edge-miss',
+      title: 'An edge miss',
+      kind: 'sync',
+      summary:
+        'A video goes viral in a region whose edges never served it. Thousands of misses for the same segment become one read from S3, through the regional shield.',
+      runsOn: 'CloudFront edge → Origin Shield → S3 with Origin Access Control',
+      participants: [
+        { id: 'viewers', label: 'Viewers', service: 'Clients' },
+        { id: 'edge', label: 'Edge location', service: 'CloudFront' },
+        { id: 'shield', label: 'Regional shield', service: 'CloudFront Origin Shield' },
+        { id: 's3', label: 'Segment storage', service: 'S3' },
+      ],
+      steps: [
+        {
+          from: 'viewers',
+          to: 'edge',
+          label: '3,000 × GET 720p seg 1',
+          note: 'Concurrent requests for the same object at one edge are collapsed into one request upstream.',
+        },
+        {
+          from: 'edge',
+          to: 'shield',
+          label: 'one miss',
+          note: 'Every edge in the world misses toward the same shield region, so a viral video costs the origin one read per segment, not one per edge.',
+        },
+        {
+          from: 'shield',
+          to: 's3',
+          label: 'GetObject v91/enc3/720p/seg-0001.m4s',
+          note: 'Only CloudFront can read the bucket, through Origin Access Control; the bucket is not public.',
+        },
+        {
+          from: 'shield',
+          to: 'edge',
+          label: 'segment, Cache-Control: max-age 1 year',
+          note: 'Safe to cache for a year because the path is versioned and the object never changes.',
+          style: 'reply',
+        },
+        {
+          from: 'edge',
+          to: 'viewers',
+          label: 'segment ×3,000',
+          note: 'The next viewers in that city get it from the edge with no origin call.',
+          style: 'reply',
+        },
+      ],
+    },
+    {
+      id: 'sweep',
+      title: 'Find stuck videos',
+      kind: 'scheduled',
+      summary:
+        'Every five minutes a sweeper finds videos whose original exists but that are not moving toward ready, and queues them again. It covers a lost event, a crashed API and a stalled workflow.',
+      runsOn: 'EventBridge Scheduler → Lambda → Aurora, S3 → SQS',
+      participants: [
+        { id: 'sched', label: 'Scheduler', service: 'EventBridge Scheduler' },
+        { id: 'sweeper', label: 'Sweeper', service: 'Lambda' },
+        { id: 'db', label: 'Metadata', service: 'Aurora PostgreSQL' },
+        { id: 's3', label: 'Raw storage', service: 'S3' },
+        { id: 'sqs', label: 'Job queue', service: 'SQS' },
+      ],
+      steps: [
+        {
+          from: 'sched',
+          to: 'sweeper',
+          label: 'every 5 min',
+          note: 'A few hundred rows at most, well within a Lambda run.',
+          style: 'async',
+        },
+        {
+          from: 'sweeper',
+          to: 'db',
+          label: 'uploading with complete called, or processing > 15 min idle',
+          note: 'The age of the oldest stuck video is published as a metric and alarmed.',
+        },
+        {
+          from: 'sweeper',
+          to: 's3',
+          label: 'HeadObject raw/v91',
+          note: 'Only videos whose original really exists are re-queued; the rest are abandoned uploads that the lifecycle rule will clean up.',
+        },
+        {
+          from: 'sweeper',
+          to: 'sqs',
+          label: 'enqueue v91, attempt 2',
+          note: 'Only after checking the last execution: if it is still running nothing is queued; if it failed or timed out, the next attempt starts under a new name, and its deterministic keys overwrite whatever the first attempt left.',
+        },
+      ],
+    },
+    {
+      id: 'spot',
+      title: 'A Spot instance is reclaimed',
+      kind: 'direct',
+      summary:
+        'EC2 reclaims a Spot instance in the middle of a chunk. The chunk is retried elsewhere; a chunk that fails every time ends in a dead-letter state and the video is marked failed.',
+      runsOn: 'EC2 Spot → AWS Batch → Step Functions retry → S3',
+      participants: [
+        { id: 'ec2', label: 'Spot instance', service: 'EC2' },
+        { id: 'enc', label: 'Transcoder task', service: 'AWS Batch' },
+        { id: 'sfn', label: 'Orchestrator', service: 'Step Functions' },
+        { id: 'seg', label: 'Segment storage', service: 'S3' },
+      ],
+      steps: [
+        {
+          from: 'ec2',
+          to: 'enc',
+          label: 'two-minute interruption notice',
+          note: 'A 4-second chunk takes seconds to encode, so most tasks finish inside the notice; the rest stop.',
+          style: 'async',
+        },
+        {
+          from: 'enc',
+          to: 'sfn',
+          label: 'task failed',
+          note: 'Nothing partial is visible: an S3 PUT either stores the whole object or nothing.',
+          style: 'reply',
+        },
+        {
+          from: 'sfn',
+          to: 'enc',
+          label: 'retry chunk-017 720p (attempt 2 of 3)',
+          note: 'On another instance, often of another type, since Batch draws from several Spot pools.',
+        },
+        {
+          from: 'enc',
+          to: 'seg',
+          label: 'PUT v91/enc3/720p/chunk-017',
+          note: 'The same key as the lost attempt. After three failures the video is marked failed, the creator is told, and the original stays for a replay after an encoder fix.',
+        },
+      ],
+    },
+  ],
   deepDives: [
     {
       question: 'How do large files get uploaded reliably?',
@@ -326,6 +655,67 @@ export const videoStreaming: Design = {
       choice:
         'A small base ladder for every upload, and the high-resolution and more efficient encodings only once a video passes a view threshold. The originals are kept, so any rendition can be produced later.',
     },
+    {
+      question: 'How do we protect the system from what people upload?',
+      options: [
+        {
+          name: 'Trust the file once the upload is authenticated',
+          pros: 'Nothing extra to build.',
+          cons: 'Decoders parse untrusted binary formats; a crafted file can exploit one and reach whatever the worker can reach.',
+        },
+        {
+          name: 'Scan uploads with antivirus before processing',
+          pros: 'Catches known malware.',
+          cons: 'Says little about a malformed video built to break a decoder.',
+        },
+        {
+          name: 'Isolate decoding and limit everything around it',
+          pros: 'A compromised transcoder can read its input chunk and write its output key, nothing else.',
+          cons: 'Network rules, narrow roles and time limits to maintain.',
+        },
+      ],
+      choice:
+        'Isolate. Transcoders run in private subnets with no internet access, with a role that reads raw/ and writes only the video’s output prefix, a size and duration check first, and a timeout per task. Upload URLs are signed per part, expire within hours, and are issued only to signed-in creators under a per-creator limit; the buckets are private and only CloudFront reads segments.',
+    },
+    {
+      question: 'Which streaming format, and how many copies of each segment?',
+      options: [
+        {
+          name: 'HLS with MPEG-TS segments',
+          pros: 'Plays on every Apple device and most players.',
+          cons: 'Other platforms prefer DASH, so supporting both means two sets of segments.',
+        },
+        {
+          name: 'HLS and DASH, each with its own segments',
+          pros: 'Native on every platform.',
+          cons: 'Twice the segment storage and half the CDN cache efficiency.',
+        },
+        {
+          name: 'CMAF: one set of fragmented MP4 segments, two manifests',
+          pros: 'HLS and DASH players read the same segments, so storage and edge caches hold one copy.',
+          cons: 'Very old devices that only play MPEG-TS need a fallback.',
+        },
+      ],
+      choice:
+        'CMAF segments of 4 seconds with an HLS and a DASH manifest. One copy of every segment halves storage and doubles the useful size of every edge cache compared with two formats.',
+    },
+    {
+      question: 'Build the pipeline, or use AWS Elemental MediaConvert?',
+      options: [
+        {
+          name: 'MediaConvert',
+          pros: 'Managed transcoding with standard ladders and packaging; no fleet to run.',
+          cons: 'Billed per minute of output, which at 400 million seconds of video a day is a large bill, and less control over chunking and priorities.',
+        },
+        {
+          name: 'Our own transcoders on Spot instances',
+          pros: 'Thousands of cores at a fraction of on-demand price, full control of codecs, ladders and priorities.',
+          cons: 'An orchestrator, interruption handling and encoder upgrades to own.',
+        },
+      ],
+      choice:
+        'Our own chunked pipeline on Spot at this volume, because compute is the first bottleneck and the largest controllable cost. At MVP volume, MediaConvert or the single worker per video is simpler, and MediaConvert stays useful for rare formats.',
+    },
   ],
   wrapUp:
     'Resumable multipart uploads straight to object storage, a queued pipeline that transcodes chunks in parallel, segments and manifests for adaptive bitrate, metadata kept apart from media, and a CDN with a shield layer serving almost every byte.',
@@ -370,7 +760,7 @@ export const videoStreaming: Design = {
       'The full quality ladder from the first view. High resolutions are added only after a video passes the view threshold.',
       'Fresh metadata on every read. Cached and replica reads can lag by seconds, so a video can show as processing briefly after it is ready, and an edit to a title takes a moment to appear.',
       'Stall-free playback. Adaptive bitrate lowers quality to avoid stalls, but cannot fix a connection slower than the lowest rung.',
-      'That an abandoned upload can be resumed forever. Parts without a complete are deleted by the lifecycle rule after a few days.',
+      'That an abandoned upload can be resumed forever. Parts without a complete are deleted by the lifecycle rule after 7 days.',
     ],
   },
   failures: [
@@ -399,7 +789,7 @@ export const videoStreaming: Design = {
       impact:
         'One chunk of one rendition is missing, so the video cannot be packaged. A chunk that always fails would block the video forever if retried without limit.',
       detection:
-        'The task is not acknowledged before its visibility timeout. Task retry rate and the age of the oldest unfinished chunk are tracked; a chunk that reaches the attempt limit goes to a dead-letter queue.',
+        'The Batch task fails or passes its timeout, and Step Functions sees it. Task retry rate and the age of the oldest unfinished chunk are tracked; a chunk that reaches the attempt limit fails the workflow.',
       recovery:
         'The orchestrator hands the chunk to another transcoder. An object write is all or nothing, so a half-written chunk is never visible. After the attempt limit the video is marked "failed", the creator is told, and the original is kept so the job can be replayed after an encoder fix.',
     },
@@ -487,8 +877,156 @@ export const videoStreaming: Design = {
       'Hundreds of millions of small objects a day make listing useless, so every key is derived from the video id, rendition and segment number, and nothing in the read path ever lists a bucket.',
     ],
   },
+  infrastructure: {
+    provider: 'AWS',
+    intro:
+      'One concrete way to run this design on AWS, with processing in one region and delivery from CloudFront edges worldwide. The services below are examples that fit, not the only option.',
+    items: [
+      {
+        part: 'Video API',
+        service:
+          'Application Load Balancer and Amazon ECS on AWS Fargate; Amazon Cognito for creators; AWS WAF',
+        why: 'Small control requests only: create, complete, metadata. The bytes never pass through it.',
+        watch:
+          'TargetResponseTime and HTTPCode_Target_5XX_Count; WAF BlockedRequests on upload creation.',
+      },
+      {
+        part: 'Raw storage and uploads',
+        service: 'Amazon S3 multipart upload with presigned part URLs; lifecycle rules',
+        why: 'Resumable, parallel uploads straight from the creator, checksums per part, durable across zones on complete. A rule aborts incomplete uploads after 7 days and moves originals to a colder class after processing.',
+        watch: 'Bytes in incomplete multipart uploads (S3 Storage Lens), 4xx and 5xx on PUT.',
+      },
+      {
+        part: 'Events and job queue',
+        service:
+          'S3 Event Notifications to Amazon EventBridge, then Amazon SQS with a dead-letter queue',
+        why: 'A durable buffer between bursts of uploads and the pipeline; events are at least once, which the workflow names make harmless.',
+        watch: 'ApproximateAgeOfOldestMessage, the first sign of a transcoding shortfall.',
+      },
+      {
+        part: 'Orchestrator',
+        service:
+          'AWS Step Functions, a Distributed Map over chunks and rungs, started by a Lambda that reads the queue',
+        why: 'Split, transcode every chunk for every rung, package, publish, with retries and timeouts per task and a visible state per video.',
+        watch: 'ExecutionsFailed, ExecutionsTimedOut and ExecutionTime per state machine.',
+      },
+      {
+        part: 'Transcoders',
+        service:
+          'AWS Batch on Amazon EC2 Spot, several instance types, private subnets with no internet access',
+        why: 'Thousands of cores at a fraction of on-demand price; small idempotent chunk tasks make interruptions cheap.',
+        watch:
+          'Jobs in RUNNABLE (waiting for capacity), Spot interruption rate, task failures per encoder version.',
+      },
+      {
+        part: 'Segment storage',
+        service:
+          'Amazon S3, keys derived from video id, encoding version, rendition and segment number',
+        why: 'Immutable objects under versioned paths, read only by CloudFront; nothing ever lists the bucket.',
+        watch: '5xx and 503 Slow Down responses, which mean a prefix is taking too many requests.',
+      },
+      {
+        part: 'Delivery',
+        service: 'Amazon CloudFront with Origin Shield, Origin Access Control to the bucket',
+        why: 'Terabits of egress from the edge, a regional shield that collapses misses, and a bucket that is not public.',
+        watch: 'CacheHitRate, OriginLatency, 5xxErrorRate, and origin requests per second.',
+      },
+      {
+        part: 'Metadata',
+        service: 'Amazon Aurora PostgreSQL with read replicas, Amazon ElastiCache in front',
+        why: 'About 100 writes a second on one primary (about four status writes per upload at 23 uploads a second); 200K reads a second from cache and replicas.',
+        watch: 'AuroraReplicaLag, CommitLatency, and the cache hit rate.',
+      },
+      {
+        part: 'Sweeper and notifications',
+        service:
+          'Amazon EventBridge Scheduler and AWS Lambda; Amazon SNS for creator notifications',
+        why: 'The backstop for lost events and stalled workflows, and the "your video is ready" message, deduplicated by video id.',
+        watch: 'A custom metric: age of the oldest stuck video.',
+      },
+      {
+        part: 'Player telemetry',
+        service:
+          'Player beacons into Amazon Data Firehose, queried with Amazon Athena; key ratios as CloudWatch metrics',
+        why: 'Start time and stalls are only visible from the player; they are the SLOs.',
+        watch: 'Start time p95 and rebuffer ratio per region, CDN and rung.',
+      },
+      {
+        part: 'Security and cost',
+        service: 'IAM roles per stage, AWS KMS for buckets, AWS CloudTrail, AWS Cost Explorer',
+        why: 'Each stage reads one prefix and writes another. The bill is egress, then storage, then Spot compute, which is why the ladder starts small and originals go cold.',
+        watch: 'CloudFront, S3 and EC2 as separate lines in Cost Explorer.',
+      },
+    ],
+    limits: [
+      'An S3 multipart upload has at most 10,000 parts, each at least 5 MB except the last, so part size grows with file size.',
+      'A presigned URL lasts at most 7 days when signed with long-term credentials, and no longer than the session when signed with temporary ones; upload URLs here last a few hours.',
+      'S3 serves about 3,500 writes and 5,500 reads a second per prefix and scales by prefix, so keys start with the video id; 400M new objects a day is about 4,600 writes a second spread across many prefixes.',
+      'A Spot instance gets a two-minute notice before it is reclaimed, which is why tasks are a few seconds of video each.',
+      'Step Functions execution names must be unique per state machine for 90 days, which makes a name an idempotency key for starting a workflow.',
+      'A Step Functions Distributed Map runs up to 10,000 child executions in parallel, far above the 200 tasks of a typical video.',
+      'An Aurora cluster has at most 15 read replicas; with the cache in front, a few are enough.',
+    ],
+  },
+  slos: [
+    {
+      objective: 'Start time',
+      target: '95% of plays show the first frame within 2 s',
+      measure: 'Player beacons, per region and CDN.',
+    },
+    {
+      objective: 'Smooth playback',
+      target: 'Rebuffering under 0.5% of watch time',
+      measure: 'Stall time over watch time, from player beacons.',
+    },
+    {
+      objective: 'Time to ready',
+      target: '95% of videos under 10 minutes long are ready within 10 minutes of complete',
+      measure: 'Ready time minus complete time from the metadata database.',
+    },
+    {
+      objective: 'Uploads',
+      target: '99.5% of started uploads that call complete succeed',
+      measure: 'Complete calls against videos that reach processing.',
+    },
+  ],
+  alarms: [
+    {
+      name: 'Processing falling behind',
+      metric: 'SQS ApproximateAgeOfOldestMessage above 5 min, or Batch jobs RUNNABLE above 10 min',
+      meaning:
+        'The first bottleneck: not enough transcoding capacity, often a Spot shortage; add instance types or on-demand capacity.',
+    },
+    {
+      name: 'Stuck videos',
+      metric: 'Custom: oldest video stuck in uploading or processing above 30 min',
+      meaning: 'Events lost or workflows stalled faster than the sweeper fixes them.',
+    },
+    {
+      name: 'Failed videos',
+      metric: 'Step Functions ExecutionsFailed above 1% of executions for 15 min',
+      meaning:
+        'Usually a bad encoder release or a new input format; roll back the encoder version.',
+    },
+    {
+      name: 'Edge hit rate',
+      metric: 'CloudFront CacheHitRate below 90% for 10 min',
+      meaning: 'Origin load is climbing toward S3 limits; check cache headers and the shield.',
+    },
+    {
+      name: 'Viewers stalling',
+      metric: 'Rebuffer ratio above 1% in any region for 10 min',
+      meaning:
+        'A CDN or network problem in that region; consider steering traffic or lowering the starting rung.',
+    },
+    {
+      name: 'Delivery errors',
+      metric: 'CloudFront 5xxErrorRate above 1% for 5 min',
+      meaning: 'Missing objects or an origin problem; players are retrying and dropping quality.',
+    },
+  ],
   evolution: {
-    mvp: 'One region, one bucket and a managed CDN in front of it. Uploads already use multipart with signed URLs, because that costs little and is hard to retrofit into clients. Processing is one worker per video with a fixed ladder of three renditions, pulled from a queue, with no chunking and no orchestrator. Metadata is one database with a replica. This holds for thousands of uploads a day and short videos.',
+    mvp: 'One region, one bucket and a managed CDN in front of it. Uploads already use multipart with signed URLs, because that costs little and is hard to retrofit into clients. Processing is one worker per video with a fixed ladder of three renditions, one fewer than the base ladder at scale, pulled from a queue, with no chunking and no orchestrator. Metadata is one database with a replica. This holds for thousands of uploads a day and short videos.',
     atScale: [
       'At 10x uploads, storage cost overtakes everything else. Originals move to a cold class after processing, rarely watched renditions are dropped and rebuilt on demand, and encoding settings are chosen per video so easy content uses fewer bits.',
       'At 10x viewers, one CDN is a single point of failure and of pricing. A second CDN is added, and the player switches between them using its own measurements.',
