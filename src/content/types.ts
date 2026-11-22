@@ -133,6 +133,52 @@ export interface Design {
   readonly capacity?: Capacity;
   /** How the design should change as scale and reliability needs grow. */
   readonly evolution?: Evolution;
+  /** One concrete way to run the design on a cloud provider, part by part. */
+  readonly infrastructure?: Infrastructure;
+  /** The few objectives an on-call team would watch, each with its target and how it is measured. */
+  readonly slos?: readonly Slo[];
+  /** The alarms that page someone, each tied to one metric. */
+  readonly alarms?: readonly Alarm[];
+}
+
+/** An alarm worth waking up for. */
+export interface Alarm {
+  readonly name: string;
+  /** The metric and threshold, e.g. "SQS ApproximateAgeOfOldestMessage above 60 s". */
+  readonly metric: string;
+  /** What it means when it fires. */
+  readonly meaning: string;
+}
+
+/** One service level objective. */
+export interface Slo {
+  /** What users experience, e.g. "Delivery to an online device". */
+  readonly objective: string;
+  /** The target, e.g. "99% under 500 ms, over 28 days". */
+  readonly target: string;
+  /** The metric behind it and where it is measured. */
+  readonly measure: string;
+}
+
+/** One part of the design mapped to the managed service that would run it. */
+export interface InfrastructureItem {
+  /** The part of the design, as named in the walkthrough. */
+  readonly part: string;
+  /** The service, with the setting that matters (e.g. "Amazon DynamoDB, on-demand"). */
+  readonly service: string;
+  /** Why this service fits this part. */
+  readonly why: string;
+  /** The metrics to watch on this service, by their real names where the provider has them. */
+  readonly watch?: string;
+}
+
+export interface Infrastructure {
+  /** Cloud provider the mapping targets, e.g. "AWS". */
+  readonly provider: string;
+  readonly intro: string;
+  readonly items: readonly InfrastructureItem[];
+  /** Real limits and settings of those services that the design has to respect. */
+  readonly limits: readonly string[];
 }
 
 /** One guarantee, stated precisely (e.g. "at-least-once delivery, effectively-once effect"). */

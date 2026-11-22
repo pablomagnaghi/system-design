@@ -183,6 +183,40 @@ describe('design depth sections', () => {
       expect(evolution.avoided.length, slug).toBeGreaterThan(0);
     }
   });
+
+  it('map the infrastructure part by part, with the limits it must respect', () => {
+    for (const { slug, infrastructure } of designs) {
+      if (!infrastructure) continue;
+      expect(infrastructure.provider.trim().length, slug).toBeGreaterThan(0);
+      expect(filled(infrastructure.intro), slug).toBe(true);
+      expect(infrastructure.items.length, slug).toBeGreaterThan(0);
+      for (const item of infrastructure.items) {
+        expect(item.part.trim().length > 0 && item.service.trim().length > 0, slug).toBe(true);
+        expect(filled(item.why), slug).toBe(true);
+      }
+      expect(infrastructure.limits.length, slug).toBeGreaterThan(0);
+    }
+  });
+
+  it('tie each alarm to a metric and say what it means', () => {
+    for (const { slug, alarms } of designs) {
+      for (const alarm of alarms ?? []) {
+        expect(alarm.name.trim().length > 0 && filled(alarm.metric), `${slug}: ${alarm.name}`).toBe(
+          true,
+        );
+        expect(filled(alarm.meaning), `${slug}: ${alarm.name}`).toBe(true);
+      }
+    }
+  });
+
+  it('state each SLO with a target and the metric behind it', () => {
+    for (const { slug, slos } of designs) {
+      for (const slo of slos ?? []) {
+        expect(slo.objective.trim().length > 0 && slo.target.trim().length > 0, slug).toBe(true);
+        expect(filled(slo.measure), `${slug}: ${slo.objective}`).toBe(true);
+      }
+    }
+  });
 });
 
 // Precision rules (CLAUDE.md): absolute delivery and durability claims are the mistakes an audit
