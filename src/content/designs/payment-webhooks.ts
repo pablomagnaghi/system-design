@@ -155,7 +155,7 @@ export const paymentWebhooks: Design = {
         nodes: ['provider', 'endpoint'],
         travel: [['provider', 'endpoint']],
         short: 'Push event',
-        metrics: { users: '100K', requestsPerSecond: '50', p95Latency: '400 ms', errorRate: '0%' },
+        metrics: { users: '100K', requestsPerSecond: '100', p95Latency: '400 ms', errorRate: '0%' },
         load: { endpoint: 15, db: 10 },
       },
       {
@@ -167,7 +167,7 @@ export const paymentWebhooks: Design = {
         nodes: ['endpoint'],
         travel: [],
         short: 'Verify',
-        metrics: { users: '100K', requestsPerSecond: '50', p95Latency: '400 ms', errorRate: '0%' },
+        metrics: { users: '100K', requestsPerSecond: '100', p95Latency: '400 ms', errorRate: '0%' },
         load: { endpoint: 18 },
       },
       {
@@ -223,7 +223,7 @@ export const paymentWebhooks: Design = {
       {
         title: 'Hand off to a work queue',
         narration:
-          'The processor stops polling the inbox. A relay polls the inbox for rows still marked as received, publishes them to a queue that gives retries with backoff and a visibility timeout, and marks them published. The endpoint itself never publishes. A sweep publishes again any row left published for more than 3 hours, longer than the worst backlog, so a message lost on the way cannot strand an event.',
+          'The processor stops polling the inbox. A relay polls the inbox for rows still marked as received, publishes them to a queue that gives retries with backoff and a visibility timeout, and marks them published, an update that only touches rows still marked received. Events that need a fetch from the provider go to a queue of their own with its own consumers, drawn here as one work queue, so a provider slowdown holds back only those. The endpoint itself never publishes. A sweep publishes again any row left published for more than 3 hours, longer than the worst backlog, so a message lost on the way cannot strand an event.',
         tradeoff:
           'A managed queue scales and retries for us. Publishing from the endpoint after the insert would be a dual write: a crash between the two would strand an event that was already acknowledged, and the provider would not send it again. The relay closes that gap at the cost of publishing at least once, which the processor makes harmless by checking the inbox status. At low volume, a worker polling the inbox table is simpler and has one less moving part, and it is easy to move to a queue later.',
         nodes: ['inbox', 'queue'],
@@ -259,7 +259,7 @@ export const paymentWebhooks: Design = {
       {
         title: 'Failures go to dead letters',
         narration:
-          'An event that keeps failing moves to a dead-letter queue after five receives and raises an alert. On that last attempt the processor marks its inbox row failed with the error, so the relay sweep does not revive it. After a fix, replay sets the row back to received and the relay publishes it like a new event.',
+          'An event that keeps failing moves to a dead-letter queue after five receives. A small consumer on that queue marks the inbox row failed and deletes the message, so the row is marked even when the last attempt died without writing anything, and the relay sweep does not revive it. A failed row raises an alert. After a fix, replay sets the row back to received and the relay publishes it like a new event, which also clears the alert.',
         tradeoff:
           'Retrying forever hides bugs and blocks nothing visible; giving up silently loses money. A dead-letter queue with an alert makes every stuck event someone’s job, and replay is safe because handlers are idempotent.',
         nodes: ['queue', 'dlq'],
@@ -327,7 +327,7 @@ export const paymentWebhooks: Design = {
           from: 'endpoint',
           to: 'db',
           label: 'INSERT inbox ON CONFLICT (event_id) DO NOTHING',
-          note: 'One small row with status received. Aurora acknowledges the commit only after it is on storage in several zones, so a 2xx never covers an event that one machine could lose.',
+          note: 'One small row with status received. Aurora acknowledges the commit only after a quorum of four of its six storage copies, spread over three zones, has it, so a 2xx never covers an event that one machine could lose.',
         },
         {
           from: 'db',
@@ -355,7 +355,7 @@ export const paymentWebhooks: Design = {
       participants: [
         { id: 'relay', label: 'Relay', service: 'ECS Fargate' },
         { id: 'db', label: 'Inbox table', service: 'Aurora PostgreSQL' },
-        { id: 'sqs', label: 'Work queue', service: 'SQS standard' },
+        { id: 'sqs', label: 'Work queues', service: 'SQS standard, two queues' },
       ],
       steps: [
         {
@@ -368,20 +368,20 @@ export const paymentWebhooks: Design = {
           from: 'relay',
           to: 'sqs',
           label: 'SendMessageBatch {eventId} × 10',
-          note: 'Messages carry only the event id. The payload stays in the inbox, which keeps messages far below the 256 KB limit and leaves one copy of the truth.',
+          note: 'Messages carry only the event id. The payload stays in the inbox, which keeps messages far below the 1 MiB limit and leaves one copy of the truth. Event types that change money, and so need a fetch from the provider, go to the fetch queue; the rest go to a second queue with its own consumers.',
           style: 'async',
         },
         {
           from: 'relay',
           to: 'db',
-          label: 'UPDATE status=published, published_at=now()',
-          note: 'A crash between the send and this update publishes the batch again. That is the at-least-once side of the relay, and the processor’s status check absorbs it.',
+          label: 'UPDATE status=published WHERE status=received',
+          note: 'It also sets published_at. The condition keeps the relay from overwriting a row that a fast processor has already marked processed. A crash between the send and this update publishes the batch again. That is the at-least-once side of the relay, and the processor’s status check absorbs it.',
         },
         {
           from: 'relay',
           to: 'db',
           label: 'republish rows published over 3 h ago',
-          note: 'A message lost in a bad deploy would leave a row published forever; the sweep publishes it again. The deadline is longer than the worst expected backlog of about 70 minutes, and rows already marked failed are skipped, so dead letters stay dead until someone replays them.',
+          note: 'A message lost in a bad deploy would leave a row published forever; the sweep publishes it again. The deadline is longer than the worst expected backlog of about 70 minutes, and only rows still marked published are swept. The dead-letter consumer has marked a dead letter’s row failed long before the deadline, so dead letters stay dead until someone replays them.',
         },
       ],
     },
@@ -393,7 +393,7 @@ export const paymentWebhooks: Design = {
         'A processor takes the message, fetches the current payment from the provider and writes the payment status, the ledger entries, an outbox row and the inbox status in one transaction.',
       runsOn: 'Amazon SQS → processor on ECS Fargate → provider API → Aurora PostgreSQL',
       participants: [
-        { id: 'sqs', label: 'Work queue', service: 'SQS standard' },
+        { id: 'sqs', label: 'Fetch queue', service: 'SQS standard' },
         { id: 'proc', label: 'Processor', service: 'ECS Fargate' },
         { id: 'api', label: 'Provider API', service: 'External' },
         { id: 'db', label: 'Payments + ledger', service: 'Aurora PostgreSQL' },
@@ -403,7 +403,7 @@ export const paymentWebhooks: Design = {
           from: 'sqs',
           to: 'proc',
           label: 'ReceiveMessage {eventId}',
-          note: 'The message becomes invisible for 60 s. If the processor dies, it reappears for another one.',
+          note: 'A money-changing event, so it comes from the fetch queue. The message becomes invisible for 60 s. If the processor dies, it reappears for another one.',
           style: 'async',
         },
         {
@@ -416,7 +416,7 @@ export const paymentWebhooks: Design = {
           from: 'proc',
           to: 'api',
           label: 'GET payment pi_123',
-          note: 'Money-changing events are applied from the current object, about 200 ms, so a late or reordered event cannot move the payment backwards. A 429 is retried with backoff and does not count against the dead-letter limit.',
+          note: 'Money-changing events are applied from the current object, about 200 ms, so a late or reordered event cannot move the payment backwards. A 429 is retried inside the handler with backoff, and the handler extends the visibility timeout with ChangeMessageVisibility while it waits. SQS counts every receive toward the dead-letter limit, so the message must not be received again while the provider is the problem.',
         },
         {
           from: 'proc',
@@ -428,7 +428,7 @@ export const paymentWebhooks: Design = {
           from: 'proc',
           to: 'db',
           label: 'INSERT ledger, outbox; UPDATE inbox=processed; COMMIT',
-          note: 'Ledger entries have a unique key of provider object id plus entry type, so a second event or a reconciliation repair for the same money is refused. All of it commits together or not at all.',
+          note: 'The inbox update is conditional on the row not being processed yet, whether it is still received or already published. Ledger entries have a unique key of provider object id plus entry type, so a second event or a reconciliation repair for the same money is refused. All of it commits together or not at all.',
         },
         {
           from: 'proc',
@@ -477,11 +477,12 @@ export const paymentWebhooks: Design = {
       title: 'Dead letter and replay',
       kind: 'direct',
       summary:
-        'A bug makes one event type fail every time. After five receives it lands in the dead-letter queue, someone is paged, a fix ships and the stored event is replayed.',
-      runsOn: 'Amazon SQS redrive → dead-letter queue → CloudWatch alarm → admin replay',
+        'A bug makes one event type fail every time. After five receives it lands in the dead-letter queue, its inbox row is marked failed, someone is paged, a fix ships and the stored event is replayed.',
+      runsOn:
+        'Amazon SQS redrive → dead-letter queue → dead-letter consumer → CloudWatch alarm → admin replay',
       participants: [
-        { id: 'sqs', label: 'Work queue', service: 'SQS standard' },
-        { id: 'dlq', label: 'Dead letters', service: 'SQS' },
+        { id: 'sqs', label: 'Work queues', service: 'SQS standard' },
+        { id: 'dlq', label: 'Dead letters', service: 'SQS + consumer on ECS' },
         { id: 'oncall', label: 'On-call engineer', service: 'CloudWatch alarm' },
         { id: 'admin', label: 'Admin API', service: 'ECS, IAM-protected' },
         { id: 'db', label: 'Inbox table', service: 'Aurora PostgreSQL' },
@@ -491,14 +492,20 @@ export const paymentWebhooks: Design = {
           from: 'sqs',
           to: 'dlq',
           label: 'maxReceiveCount 5 reached',
-          note: 'The redrive policy moves the message after five failed attempts. Rate-limit retries are not failures and are kept out of this count.',
+          note: 'The redrive policy moves the message once it has been received five times without being deleted. SQS counts every receive and cannot exclude any, so a rate-limited fetch is retried inside one receive, with the visibility timeout extended, and waiting on the provider does not use the five up.',
           style: 'async',
         },
         {
           from: 'dlq',
+          to: 'db',
+          label: 'UPDATE inbox SET status=failed; DeleteMessage',
+          note: 'The dead-letter consumer does this for every message, so the row is marked failed even when the fifth attempt crashed without writing anything, and the relay sweep leaves it alone. The dead-letter queue is empty again afterwards.',
+        },
+        {
+          from: 'db',
           to: 'oncall',
-          label: 'ApproximateNumberOfMessagesVisible > 0',
-          note: 'Every dead letter is money not recorded, so one is enough to page. On its last attempt the processor marked the inbox row failed with the error, so the relay sweep leaves it alone.',
+          label: 'failed inbox rows > 0',
+          note: 'Every failed row is money not recorded, so one is enough to page. The alarm is measured on the inbox, not on the queue, so it stops only when the rows are replayed.',
           style: 'async',
         },
         {
@@ -511,7 +518,7 @@ export const paymentWebhooks: Design = {
           from: 'admin',
           to: 'db',
           label: 'UPDATE inbox SET status=received',
-          note: 'The relay publishes it again like any new event. Replay is safe because every write in the handler is conditional or keyed.',
+          note: 'The relay publishes it again like any new event, as a fresh message with a receive count of zero, and the failed-rows alarm clears. Replay is safe because every write in the handler is conditional or keyed.',
         },
       ],
     },
@@ -657,7 +664,7 @@ export const paymentWebhooks: Design = {
         },
       ],
       choice:
-        'One fetch per payment now, with a circuit breaker that pauses fetching handlers on repeated 429s. Applying from the payload and fetching only on conflict is the step taken at 10x, when post-spike lag would last hours.',
+        'One fetch per payment now, with a circuit breaker that pauses the consumers of the fetch queue on repeated 429s. Applying from the payload and fetching only on conflict is the step taken at 10x, when post-spike lag would last hours.',
     },
     {
       question: 'How should the ledger record money?',
@@ -711,7 +718,7 @@ export const paymentWebhooks: Design = {
       {
         property: 'Processing',
         promise:
-          'At least once, made harmless by the provider event id. The handler flips the inbox row from received to processed with a conditional update in the same transaction as the payment, ledger and outbox writes. They commit together or not at all, so the ledger never disagrees with the payment state, and a redelivered message finds the row processed and does nothing. A unique key on each ledger entry (provider object id plus entry type) covers two different events, or an event and a reconciliation repair, that describe the same movement of money.',
+          'At least once, made harmless by the provider event id. The handler flips the inbox row to processed with a conditional update on a status that is not yet processed (received or published), in the same transaction as the payment, ledger and outbox writes. They commit together or not at all, so the ledger never disagrees with the payment state, and a redelivered message finds the row processed and does nothing. A unique key on each ledger entry (provider object id plus entry type) covers two different events, or an event and a reconciliation repair, that describe the same movement of money.',
       },
       {
         property: 'Ordering',
@@ -726,7 +733,7 @@ export const paymentWebhooks: Design = {
       {
         property: 'Completeness',
         promise:
-          'An event that the provider never delivers is found by the daily reconciliation, so a missing payment or refund goes unnoticed for about a day at most.',
+          'An event that the provider never delivers is found by the daily reconciliation, so a missing payment or refund goes unnoticed for a little over a day at most: the 03:00 run covers the previous day, up to about 27 hours back.',
       },
     ],
     assumes: [
@@ -762,7 +769,7 @@ export const paymentWebhooks: Design = {
       impact:
         'Before the commit, nothing was written and the event is late by one visibility timeout. After the commit, the message is delivered again although the work is done.',
       detection:
-        'Queue redelivery count and the age of the oldest inbox row not yet processed, alarmed at a few minutes. That one metric also catches a stalled relay and a lost queue message.',
+        'Queue redelivery count and the age of the oldest inbox row still waiting (received or published), alarmed at a few minutes. That one metric also catches a stalled relay and a lost queue message.',
       recovery:
         'The redelivered message either does the work for the first time or finds the inbox row already processed and stops. Rows published but still unprocessed after a deadline are published again by the relay. Outbox rows committed with the transaction are sent by their own worker.',
     },
@@ -788,18 +795,18 @@ export const paymentWebhooks: Design = {
     {
       scenario: 'The provider API is down or rate limiting the fetch of current objects.',
       impact:
-        'Money-changing events cannot be applied and their backlog grows, so orders stay pending after the customer has paid. Ingestion is unaffected, and events that need no fetch keep flowing.',
+        'Money-changing events cannot be applied and their backlog grows, so orders stay pending after the customer has paid. Ingestion is unaffected, and events that need no fetch keep flowing, because the relay sends them to a separate queue with its own consumers.',
       detection:
-        'Fetch error rate and the rate of 429 responses, with the age of the oldest queued message as the user-facing signal.',
+        'Fetch error rate and the rate of 429 responses, with the age of the oldest message in the fetch queue as the user-facing signal.',
       recovery:
-        'These failures are retried with backoff and do not count toward the dead-letter limit, since the event is not at fault; a circuit breaker pauses the fetching handlers instead of burning attempts. When the API returns, the backlog drains at the rate limit. State is late, never wrong.',
+        'The event is not at fault, so these failures must not use up the five receives that lead to the dead-letter queue. SQS counts every receive, so the handler keeps the message: it retries the fetch in-process with backoff and extends the visibility timeout with ChangeMessageVisibility. On repeated failures a circuit breaker stops the fetch consumers from receiving new messages, which wait in their queue untouched. When the API returns, the backlog drains at the rate limit. State is late, never wrong.',
     },
     {
       scenario: 'A deploy breaks the handler for one event type, and every dispute event fails.',
       impact:
-        'Hundreds of events dead-letter within minutes and each one pages. Other event types keep flowing, but disputes are not recorded.',
+        'Hundreds of events dead-letter within minutes and each one is marked failed. Other event types keep flowing, but disputes are not recorded.',
       detection:
-        'The dead-letter alarm, grouped by event type, so a burst reads as one incident instead of hundreds of pages; the processor error rate per type points at the deploy.',
+        'The failed-rows alarm, grouped by event type, so a burst reads as one incident instead of hundreds of pages; the processor error rate per type points at the deploy.',
       recovery:
         'Roll back, or switch off that event type with a flag so the processor marks its rows failed without burning attempts. After the fix, one bulk replay sets every failed row of that type back to received and the relay republishes them at its normal pace. Nothing was lost, because the inbox kept every payload.',
     },
@@ -856,7 +863,7 @@ export const paymentWebhooks: Design = {
     ],
     implications: [
       'A peak 20 times the average is why the endpoint only stores and acknowledges: 2,000 single-row inserts per second fit one database primary, while 2,000 full handlers per second with an API call each do not fit anything.',
-      'The provider rate limit, not our hardware, sets the processing rate. Adding processors past about 40 concurrent handlers (20 fetches in flight, plus about 20 handlers for the events that need none) buys nothing, so the queue is sized to hold more than an hour of backlog and lag is an expected state with its own alarm threshold.',
+      'The provider rate limit, not our hardware, sets the processing rate. Adding processors past about 40 concurrent handlers (20 fetches in flight on the fetch queue, plus about 20 handlers on the other queue for the events that need none) buys nothing, so the fetch queue is sized to hold more than an hour of backlog and lag is an expected state with its own alarm threshold.',
       'Because the backlog is bounded by a limit we do not control, fetches are worth saving: one fetch per payment serves all of its events that are waiting, and events that change no money skip it.',
       'Half a terabyte of payloads in the transactional database is why the inbox is partitioned by day: the purge becomes dropping a partition instead of deleting 8.6 million rows.',
       'Reconciliation shares the API limit with the processor, so it runs off peak under its own budget of about 20 calls per second and must be resumable from a cursor.',
@@ -878,37 +885,39 @@ export const paymentWebhooks: Design = {
         part: 'Inbox, payments, ledger and outbox',
         service:
           'Amazon Aurora PostgreSQL with a replica in another zone; the inbox partitioned by day',
-        why: 'One database gives the unique event id, conditional updates and the single transaction across all four tables. Aurora acknowledges a commit only after it is written across three zones, which is what makes the 2xx safe.',
+        why: 'One database gives the unique event id, conditional updates and the single transaction across all four tables. Aurora acknowledges a commit only after a quorum of four of the six storage copies, spread over three zones, has it, which is what makes the 2xx safe.',
         watch:
           'CommitLatency, DatabaseConnections, Deadlocks and CPUUtilization on the writer, and the failover event.',
       },
       {
         part: 'Relay',
         service: 'Two Amazon ECS tasks polling the inbox with SKIP LOCKED',
-        why: 'The only path from the inbox to the queue, so the endpoint never makes a second write.',
+        why: 'The only path from the inbox to the queues, so the endpoint never makes a second write. It routes by event type: money-changing events to the fetch queue, the rest to the other.',
         watch: 'A custom metric of the age of the oldest received row, the relay’s own lag.',
       },
       {
         part: 'Work queue',
         service:
-          'Amazon SQS standard queue, 60 s visibility timeout, redrive to a dead-letter queue after 5 receives',
-        why: 'Retries, backoff and buffering for a backlog of hundreds of thousands of events with no servers to run. Duplicates and reordering are already harmless here, so a FIFO queue buys nothing.',
+          'Two Amazon SQS standard queues, one for events that need a provider fetch and one for the rest, each with a 60 s visibility timeout and redrive to a shared dead-letter queue after 5 receives',
+        why: 'Retries, backoff and buffering for a backlog of hundreds of thousands of events with no servers to run. Two queues let the fetch consumers pause on a provider slowdown while the other events keep flowing. Duplicates and reordering are already harmless here, so a FIFO queue buys nothing.',
         watch:
-          'ApproximateAgeOfOldestMessage, ApproximateNumberOfMessagesVisible, and NumberOfMessagesReceived against NumberOfMessagesDeleted.',
+          'On each queue: ApproximateAgeOfOldestMessage, ApproximateNumberOfMessagesVisible, and NumberOfMessagesReceived against NumberOfMessagesDeleted.',
       },
       {
         part: 'Processor',
         service:
-          'Amazon ECS on Fargate, scaling on queue depth, capped at about 40 concurrent handlers',
-        why: 'The provider limit sets the useful concurrency, so the cap keeps extra tasks from only collecting 429s.',
+          'Amazon ECS on Fargate, one consumer group per queue, scaling on queue depth, capped at about 40 concurrent handlers in total',
+        why: 'The provider limit sets the useful concurrency, so the cap of about 20 on the fetch consumers keeps extra tasks from only collecting 429s, and their circuit breaker pauses them without touching the other group.',
         watch:
           'Custom metrics: provider fetch latency, 429 rate, circuit breaker state, and refused backward transitions.',
       },
       {
         part: 'Dead letters',
-        service: 'Amazon SQS dead-letter queue with a CloudWatch alarm',
-        why: 'Every event that cannot be applied becomes visible and paged instead of retried forever.',
-        watch: 'ApproximateNumberOfMessagesVisible, which should be zero.',
+        service:
+          'Amazon SQS dead-letter queue, a small consumer on Amazon ECS that marks inbox rows failed, and a CloudWatch alarm',
+        why: 'Every event that cannot be applied becomes visible and paged instead of retried forever. The alarm counts failed inbox rows, so it clears when they are replayed.',
+        watch:
+          'A custom count of failed inbox rows, which should be zero, and ApproximateAgeOfOldestMessage on the dead-letter queue, which shows a stalled consumer.',
       },
       {
         part: 'Side effects',
@@ -938,8 +947,9 @@ export const paymentWebhooks: Design = {
       },
     ],
     limits: [
-      'An SQS message is at most 256 KB, so it carries the event id and the payload stays in the inbox.',
-      'The SQS visibility timeout goes up to 12 hours; 60 s is set well above a handler of about 200 ms, so a slow fetch does not release a message to a second processor.',
+      'An SQS message is at most 1 MiB, so it carries the event id and the payload stays in the inbox.',
+      'The SQS visibility timeout goes up to 12 hours, counted from the first receive; 60 s is set well above a handler of about 200 ms, so a slow fetch does not release a message to a second processor, and a handler waiting on a rate-limited fetch extends it.',
+      'SQS raises the receive count on every receive and the redrive policy cannot exclude any, so a retry that should not count toward the dead-letter limit has to happen without a new receive.',
       'SQS keeps a message for at most 14 days, far longer than the worst backlog, and the inbox remains the record anyway.',
       'A standard SQS queue delivers at least once and does not keep order, which the design already assumes.',
       'Lambda stops at 15 minutes, so the 20-minute reconciliation runs as an ECS task.',
@@ -968,14 +978,14 @@ export const paymentWebhooks: Design = {
     {
       objective: 'Dead letters',
       target: 'Every dead letter triaged within 4 hours',
-      measure: 'Age of the oldest message in the dead-letter queue.',
+      measure: 'Age of the oldest inbox row with status failed.',
     },
   ],
   alarms: [
     {
       name: 'Events not being applied',
       metric:
-        'Custom: oldest unprocessed inbox row older than 5 min, or older than 90 min during a peak',
+        'Custom: oldest inbox row still received or published older than 5 min, or older than 90 min during a peak',
       meaning:
         'The relay stalled, processors are down, or the provider limit is holding the drain; one metric covers all three because it is measured on the inbox.',
     },
@@ -992,7 +1002,7 @@ export const paymentWebhooks: Design = {
     },
     {
       name: 'Dead letter',
-      metric: 'SQS ApproximateNumberOfMessagesVisible above 0 on the dead-letter queue',
+      metric: 'Custom: inbox rows with status failed above 0',
       meaning:
         'An event cannot be applied and money is not recorded until someone fixes and replays it.',
     },
@@ -1000,7 +1010,7 @@ export const paymentWebhooks: Design = {
       name: 'Provider rate limiting',
       metric: 'Custom: 429 responses above 5% of fetches, or the circuit breaker open for 5 min',
       meaning:
-        'Processing is paused by the provider; check that reconciliation is not running at peak and expect lag.',
+        'Processing of money-changing events is paused by the provider; check that reconciliation is not running at peak and expect lag.',
     },
     {
       name: 'Reconciliation',
