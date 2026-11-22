@@ -14,14 +14,18 @@ export const jobScheduler: Design = {
       'Cancel or pause a job, and see the history of every run.',
     ],
     nonFunctional: [
-      'Durable: a job is acknowledged only after a synchronously replicated write, so it survives restarts and machine failures.',
+      'Durable: a job is acknowledged only after its write is stored on a quorum of copies across zones, so it survives restarts and machine failures.',
       'Each run starts within a few seconds of its scheduled time.',
       'At-least-once execution, with job code written so a duplicate is harmless.',
-      'Scale to about 100 million runs a day (around 1K a second on average, 50K in the peak second) by adding machines.',
+      'Scale to about 100 million runs a day (about 1.2K a second on average, 50K in the peak second) by adding machines.',
+      'Each service can schedule, see and cancel only its own jobs, payloads carry references instead of secrets, and every connection is authenticated and encrypted.',
     ],
     outOfScope: [
       'Workflow orchestration with dependencies between jobs.',
       'The business logic inside each job.',
+      'Precision below one second.',
+      'Running untrusted code from customers, which needs sandboxing.',
+      'Active-active scheduling of the same job in two regions.',
     ],
   },
   entities: [
@@ -48,7 +52,8 @@ export const jobScheduler: Design = {
     {
       method: 'POST',
       path: '/jobs/{id}/pause · /jobs/{id}/cancel',
-      description: 'Stops future runs; a run already in progress finishes.',
+      description:
+        'Stops future runs. With stopRunning, a run in progress is asked to stop at its next checkpoint.',
     },
     {
       method: 'GET',
@@ -286,7 +291,7 @@ export const jobScheduler: Design = {
         tradeoff:
           'There is no single right answer: a billing job must run every missed period, while a cache refresh only needs the latest one. Making it a per-job setting avoids both duplicate work and silently skipped periods.',
         nodes: ['jobs', 'dispatcher'],
-        travel: [],
+        travel: [['jobs', 'dispatcher']],
         short: 'Catch up',
         metrics: {
           requestsPerSecond: '50K',
@@ -298,6 +303,327 @@ export const jobScheduler: Design = {
       },
     ],
   },
+  flows: [
+    {
+      id: 'schedule',
+      title: 'Schedule a job',
+      kind: 'sync',
+      summary:
+        'The billing service schedules "charge account 7 every month on the 1st at 09:00 Buenos Aires time". It gets a 201 only once the job cannot be lost.',
+      runsOn: 'ALB → Scheduler API on ECS → Aurora PostgreSQL commit across three zones',
+      participants: [
+        { id: 'svc', label: 'Billing service', service: 'Caller' },
+        { id: 'api', label: 'Scheduler API', service: 'ECS Fargate' },
+        { id: 'db', label: 'Jobs table', service: 'Aurora PostgreSQL' },
+      ],
+      steps: [
+        {
+          from: 'svc',
+          to: 'api',
+          label: 'POST /jobs {cron, timeZone, idempotencyKey}',
+          note: 'The caller signs the request with its own identity, and sends an idempotency key so a retried POST cannot create a second job.',
+        },
+        {
+          from: 'api',
+          to: 'api',
+          label: 'owner check, next run in local time → UTC',
+          note: 'The API checks the caller may create jobs of this type, computes the next 09:00 in Buenos Aires and stores it as UTC.',
+        },
+        {
+          from: 'api',
+          to: 'db',
+          label: 'INSERT job, unique idempotency key',
+          note: 'The row goes in with its owner, schedule and next run time. A repeated key returns the existing job instead.',
+        },
+        {
+          from: 'db',
+          to: 'api',
+          label: 'committed in 3 zones',
+          note: 'Aurora acknowledges the commit only after a quorum of storage copies across three zones has it, so losing a node loses nothing.',
+          style: 'reply',
+        },
+        {
+          from: 'api',
+          to: 'svc',
+          label: '201 {jobId}',
+          note: 'Only now is the job acknowledged. From here on it will run at least once per occurrence.',
+          style: 'reply',
+        },
+      ],
+    },
+    {
+      id: 'dispatch',
+      title: 'Claim and dispatch',
+      kind: 'scheduled',
+      summary:
+        'Every second, each dispatcher claims the due jobs of the partitions it leases, advances recurring ones, and puts the runs on the queue.',
+      runsOn: 'Dispatchers on ECS → Aurora claim transaction → SQS',
+      participants: [
+        { id: 'disp', label: 'Dispatcher', service: 'ECS' },
+        { id: 'db', label: 'Jobs and leases', service: 'Aurora PostgreSQL' },
+        { id: 'sqs', label: 'Work queue', service: 'SQS' },
+      ],
+      steps: [
+        {
+          from: 'disp',
+          to: 'db',
+          label: 'BEGIN; check lease epoch',
+          note: 'The transaction first checks that this dispatcher still holds partition 17 with its epoch. A dispatcher that lost the lease cannot claim.',
+        },
+        {
+          from: 'disp',
+          to: 'db',
+          label: 'SELECT due … FOR UPDATE SKIP LOCKED LIMIT 500',
+          note: 'Due rows are found by the next-run index, compared to the database clock. Skipping locked rows lets dispatchers work side by side.',
+        },
+        {
+          from: 'disp',
+          to: 'db',
+          label: 'INSERT runs; advance next run; COMMIT',
+          note: 'One run per (job, scheduled time), guarded by a unique key, a dispatch deadline, and the next occurrence for recurring jobs, all in one commit.',
+        },
+        {
+          from: 'disp',
+          to: 'sqs',
+          label: 'SendMessageBatch {runId}',
+          note: 'The message carries only the run id; the payload stays in the database. If the dispatcher dies before this, the sweeper re-enqueues the run.',
+        },
+      ],
+    },
+    {
+      id: 'run',
+      title: 'Run a job',
+      kind: 'queue',
+      summary:
+        'A worker takes the run from the queue, starts each attempt only once, does the work with the run id as an idempotency key, and records the result.',
+      runsOn:
+        'SQS → worker on ECS → Aurora conditional start → target system → run history in DynamoDB',
+      participants: [
+        { id: 'sqs', label: 'Work queue', service: 'SQS' },
+        { id: 'worker', label: 'Worker', service: 'ECS' },
+        { id: 'db', label: 'Runs', service: 'Aurora PostgreSQL' },
+        { id: 'target', label: 'Payments API', service: 'Target system' },
+        { id: 'hist', label: 'Run history', service: 'DynamoDB' },
+      ],
+      steps: [
+        {
+          from: 'sqs',
+          to: 'worker',
+          label: 'ReceiveMessage {runId}',
+          note: 'The message becomes invisible to other workers for the visibility timeout; it is deleted only after the run is recorded.',
+        },
+        {
+          from: 'worker',
+          to: 'db',
+          label: 'UPDATE run SET running WHERE attempt = 1',
+          note: 'A conditional start: if another worker already started this attempt, no row changes and this copy is dropped as a duplicate.',
+        },
+        {
+          from: 'worker',
+          to: 'target',
+          label: 'charge, Idempotency-Key: runId',
+          note: 'If an attempt is retried after it already charged, the payments API sees the same key and returns the first result.',
+        },
+        {
+          from: 'worker',
+          to: 'db',
+          label: 'heartbeat every 10 s',
+          note: 'While the job works, heartbeats keep the run alive. Three missed ones and the run is declared lost and retried.',
+          style: 'async',
+        },
+        {
+          from: 'worker',
+          to: 'db',
+          label: 'finish: succeeded',
+          note: 'The result is accepted only for the current attempt, which acts as a fencing token against an old attempt that wakes up.',
+        },
+        {
+          from: 'worker',
+          to: 'hist',
+          label: 'append attempt',
+          note: 'Start, end, worker and result go to the history, kept 30 days, so "did my job run?" always has an answer.',
+          style: 'async',
+        },
+      ],
+    },
+    {
+      id: 'retry',
+      title: 'Retry, then dead-letter',
+      kind: 'queue',
+      summary:
+        'The payments API is down. The run is retried with backoff and, after the last attempt, lands in a dead-letter queue that pages the owning team.',
+      runsOn:
+        'Worker on ECS → Aurora → SQS delayed message → SQS dead-letter queue → CloudWatch alarm',
+      participants: [
+        { id: 'worker', label: 'Worker', service: 'ECS' },
+        { id: 'db', label: 'Runs', service: 'Aurora PostgreSQL' },
+        { id: 'sqs', label: 'Work queue', service: 'SQS' },
+        { id: 'dlq', label: 'Dead letters', service: 'SQS DLQ' },
+        { id: 'team', label: 'Owning team', service: 'Alarm' },
+      ],
+      steps: [
+        {
+          from: 'worker',
+          to: 'db',
+          label: 'attempt 1 failed: 503',
+          note: 'The failure is recorded with its error, and the attempt number goes up.',
+        },
+        {
+          from: 'worker',
+          to: 'sqs',
+          label: 'requeue, delay 30 s ± jitter',
+          note: 'Exponential backoff with jitter, so a struggling target is not hammered by every job at once.',
+          style: 'async',
+        },
+        {
+          from: 'worker',
+          to: 'dlq',
+          label: 'attempt 5 failed → dead letter',
+          note: 'After the maximum attempts the run stops retrying. It ends in a recorded state instead of disappearing.',
+        },
+        {
+          from: 'dlq',
+          to: 'team',
+          label: 'alarm: new dead letters',
+          note: 'The team fixes the cause and replays the run; the same run id keeps the replay harmless.',
+          style: 'async',
+        },
+      ],
+    },
+    {
+      id: 'sweeper',
+      title: 'Sweep a lost dispatch',
+      kind: 'scheduled',
+      summary:
+        'A dispatcher committed a claim and crashed before sending the message. Nothing would ever run it, so a sweeper looks for runs dispatched but not started.',
+      runsOn: 'Sweeper task on ECS → Aurora → SQS',
+      participants: [
+        { id: 'sweep', label: 'Sweeper', service: 'ECS' },
+        { id: 'db', label: 'Runs', service: 'Aurora PostgreSQL' },
+        { id: 'sqs', label: 'Work queue', service: 'SQS' },
+      ],
+      steps: [
+        {
+          from: 'sweep',
+          to: 'db',
+          label: 'runs dispatched, past deadline (30 s)',
+          note: 'Every few seconds it queries runs still in the dispatched state past their dispatch deadline.',
+        },
+        {
+          from: 'db',
+          to: 'sweep',
+          label: 'run 9031',
+          note: 'The claim committed, the next occurrence already advanced, but no worker ever started it.',
+          style: 'reply',
+        },
+        {
+          from: 'sweep',
+          to: 'sqs',
+          label: 'SendMessage {runId: 9031}',
+          note: 'If the original message did get through, two now exist; the conditional start lets only one worker run it.',
+        },
+        {
+          from: 'sweep',
+          to: 'sweep',
+          label: 'count swept runs',
+          note: 'A steady rise means dispatchers are dying or the queue rejects writes, so it has an alarm.',
+        },
+      ],
+    },
+    {
+      id: 'lease',
+      title: 'A dispatcher dies',
+      kind: 'async',
+      summary:
+        'The dispatcher holding partition 17 stops. Its lease expires, another takes it with a higher epoch, and the old one cannot claim if it wakes up.',
+      runsOn: 'Dispatchers on ECS → lease rows in Aurora with an epoch',
+      participants: [
+        { id: 'd1', label: 'Dispatcher 1', service: 'ECS, paused' },
+        { id: 'db', label: 'Leases', service: 'Aurora PostgreSQL' },
+        { id: 'd2', label: 'Dispatcher 2', service: 'ECS' },
+      ],
+      steps: [
+        {
+          from: 'd1',
+          to: 'd1',
+          label: 'long GC pause',
+          note: 'Dispatcher 1 holds partition 17 with epoch 41 and stops renewing. Jobs in that partition wait; none are lost.',
+        },
+        {
+          from: 'd2',
+          to: 'db',
+          label: 'take expired lease → epoch 42',
+          note: 'After about 10 s the lease expires and dispatcher 2 takes it, raising the epoch.',
+        },
+        {
+          from: 'd2',
+          to: 'db',
+          label: 'claim backlog',
+          note: 'The waiting jobs start up to one lease period late, then the partition is on time again.',
+        },
+        {
+          from: 'd1',
+          to: 'db',
+          label: 'claim with epoch 41 → rejected',
+          note: 'Dispatcher 1 wakes up and tries to claim. The epoch check inside the transaction fails, so it drops the partition instead of firing jobs twice.',
+        },
+      ],
+    },
+    {
+      id: 'reconcile',
+      title: 'Hourly reconciliation',
+      kind: 'scheduled',
+      summary:
+        'The check behind the "no lost jobs" SLO. Every hour, a reconciler recomputes which occurrences were due and looks for any without a run record.',
+      runsOn: 'EventBridge Scheduler, hourly → reconciler task on ECS → Aurora → CloudWatch alarm',
+      participants: [
+        { id: 'eb', label: 'Hourly trigger', service: 'EventBridge Scheduler' },
+        { id: 'rec', label: 'Reconciler', service: 'ECS task' },
+        { id: 'db', label: 'Jobs and runs', service: 'Aurora PostgreSQL' },
+        { id: 'alarm', label: 'On-call', service: 'CloudWatch alarm' },
+      ],
+      steps: [
+        {
+          from: 'eb',
+          to: 'rec',
+          label: 'start, 10:05',
+          note: 'Once an hour is well inside EventBridge’s one-minute minimum, so a managed schedule fits here, unlike the sweeper.',
+          style: 'async',
+        },
+        {
+          from: 'rec',
+          to: 'db',
+          label: 'occurrences due 09:00–10:00',
+          note: 'From each active job’s schedule and time zone it recomputes every occurrence that was due in the last full hour, partition by partition.',
+        },
+        {
+          from: 'rec',
+          to: 'db',
+          label: 'runs for those occurrences',
+          note: 'Each occurrence should have exactly one run record, guaranteed by the unique key on job id and scheduled time.',
+        },
+        {
+          from: 'rec',
+          to: 'rec',
+          label: '1 occurrence without a run',
+          note: 'A gap means a bug: a claim that advanced the next run without inserting the run, or a schedule computed wrongly.',
+        },
+        {
+          from: 'rec',
+          to: 'db',
+          label: 'insert missing run',
+          note: 'The missing run is created following the job’s catch-up policy, and the unique key makes a second pass harmless.',
+        },
+        {
+          from: 'rec',
+          to: 'alarm',
+          label: 'MissingRuns = 1',
+          note: 'Any gap pages: the run is repaired, but the bug that caused it still exists.',
+          style: 'async',
+        },
+      ],
+    },
+  ],
   deepDives: [
     {
       question: 'How do we find due jobs at scale?',
@@ -355,6 +681,106 @@ export const jobScheduler: Design = {
       choice:
         'Cron plus time zone, computing each next run in that zone and storing it as UTC. The skipped and repeated hours get explicit rules: run at the next valid time, and only once.',
     },
+    {
+      question: 'Build it, or use a managed scheduler such as Amazon EventBridge Scheduler?',
+      options: [
+        {
+          name: 'EventBridge Scheduler',
+          pros: 'One-time and cron schedules with time zones, retries and a dead-letter queue, with nothing to operate.',
+          cons: 'Per-account quotas on schedules and invocations must be raised for millions of jobs and a 50K-per-second burst, and run history, catch-up policies and per-run idempotency stay our job.',
+        },
+        {
+          name: 'Build on a database and a queue',
+          pros: 'Full control of claiming, history, catch-up, fairness and pre-scaling for the midnight burst.',
+          cons: 'Dispatchers, leases, a sweeper and alarms to build and run.',
+        },
+      ],
+      choice:
+        'Build it, because the product is the scheduler: run history per attempt, catch-up policies, per-run idempotency keys and the burst are requirements. For a team that only needs a few thousand timers, EventBridge Scheduler is the better answer, and saying so is part of the design.',
+    },
+    {
+      question: 'How do we keep one tenant from delaying everyone else?',
+      options: [
+        {
+          name: 'One shared queue, first come first served',
+          pros: 'Simplest to run and to reason about.',
+          cons: 'A tenant that schedules 10 million jobs for midnight fills the queue and every other tenant starts late.',
+        },
+        {
+          name: 'Quotas at the API and concurrency caps at the workers',
+          pros: 'Bounds what one tenant can create and how many of its runs execute at once.',
+          cons: 'Limits to set per tenant, and a tenant over its cap runs later than scheduled.',
+        },
+        {
+          name: 'A queue per tenant',
+          pros: 'Complete isolation.',
+          cons: 'Thousands of queues to poll and scale, most of them idle.',
+        },
+      ],
+      choice:
+        'Quotas and caps, plus two priority classes. The API enforces per-tenant limits on pending jobs and on runs per minute, answering 429 above them. Workers cap concurrent runs per tenant and per job type, so a burst from one tenant waits in the queue instead of taking the pool. Critical jobs go to their own queue, polled with a larger weight. Runs over a cap are delayed, never dropped, and their lateness is visible per tenant.',
+    },
+    {
+      question: 'What happens when the code of a job changes?',
+      options: [
+        {
+          name: 'Always run the latest handler',
+          pros: 'Nothing to manage.',
+          cons: 'A run queued with an old payload shape can crash the new handler, and every retry crashes again.',
+        },
+        {
+          name: 'Pin each job to the handler version it was created with',
+          pros: 'Old runs keep their old behaviour.',
+          cons: 'Many versions to keep deployed, and fixes do not reach old jobs.',
+        },
+        {
+          name: 'Versioned payloads and compatible handlers',
+          pros: 'One deployed handler serves current and previous payload versions.',
+          cons: 'Two versions to support at once, and a migration step to retire the old one.',
+        },
+      ],
+      choice:
+        'Every payload carries a schema version, and a handler accepts the current version and the previous one. Changes roll out in two steps: first deploy handlers that read both versions, then let callers write the new one, and drop the old version once no pending job uses it. A run whose version the handler does not know fails fast to the dead-letter queue instead of being retried, and new handlers roll out to a small share of runs first.',
+    },
+    {
+      question: 'How do long jobs survive retries and cancellation?',
+      options: [
+        {
+          name: 'Restart from the beginning',
+          pros: 'No state to keep.',
+          cons: 'A two-hour job that dies at minute 110 starts over, and a job that cannot finish between failures never finishes.',
+        },
+        {
+          name: 'Checkpoints keyed by the run id',
+          pros: 'A retry resumes from the last saved position; a cancel can stop it at a safe point.',
+          cons: 'The job code must save and resume its own progress.',
+        },
+        {
+          name: 'Split it into many small jobs',
+          pros: 'Each piece is short and retried on its own.',
+          cons: 'Needs a parent that tracks the pieces, which is workflow orchestration.',
+        },
+      ],
+      choice:
+        'Checkpoints. A long job saves its position, such as the last account processed, with each heartbeat, keyed by run id. A retry reads the checkpoint and resumes there, and the work after it stays idempotent by run id. Cancellation rides on the heartbeat: its reply carries a stop flag, and the job stops at its next checkpoint. Every job type also has a hard timeout, after which the attempt is declared lost.',
+    },
+    {
+      question: 'How do we keep jobs and their payloads safe?',
+      options: [
+        {
+          name: 'Trust the internal network',
+          pros: 'Nothing to configure.',
+          cons: 'Any service can cancel another team’s jobs, and secrets in payloads end up in the database, the queue and the logs.',
+        },
+        {
+          name: 'Identity per service, tenant checks and secret references',
+          pros: 'A service sees only its jobs, payloads hold references, and each job type runs with only the permissions it needs.',
+          cons: 'An authorization check on every call, and a role per job type to maintain.',
+        },
+      ],
+      choice:
+        'Each calling service authenticates with its own identity, and every job row carries its owner, checked on create, read, pause and cancel. Payloads carry references such as a secret name, never the secret, and workers resolve them at run time. Each job type runs under its own role with least privilege, and payloads and history are encrypted at rest.',
+    },
   ],
   wrapUp:
     'Durable jobs indexed by next run time, partitioned dispatchers that claim and advance atomically, a queue to idempotent workers with heartbeats, bounded retries into dead letters, and a history that answers "did it run?".',
@@ -363,7 +789,7 @@ export const jobScheduler: Design = {
       {
         property: 'Durability',
         promise:
-          'A job acknowledged with 201 is not lost if one database node fails. The API replies only after the row is committed on the primary and on a synchronous replica, and a retried POST with the same idempotency key returns the same job instead of creating a second one.',
+          'A job acknowledged with 201 is not lost if one database node fails. The API replies only after the commit is stored on a quorum of storage copies across three zones, which Aurora does before it acknowledges, and a retried POST with the same idempotency key returns the same job instead of creating a second one.',
       },
       {
         property: 'Dispatch',
@@ -387,7 +813,7 @@ export const jobScheduler: Design = {
       },
     ],
     assumes: [
-      'The jobs database has one primary per shard, replicates synchronously and evaluates conditional writes on the primary. Leases, jobs and pending runs live in the same shard so the lease epoch can be checked inside the claim transaction.',
+      'The jobs database has one writer per shard, stores every commit on a quorum of copies across zones before acknowledging it, and evaluates conditional writes on the writer. Leases, jobs and pending runs live in the same shard so the lease epoch can be checked inside the claim transaction.',
       'Job code is idempotent for a given run id, and the systems it calls accept that id as a deduplication key and keep it longer than the retry window.',
       'The work queue is durable and delivers at least once.',
       'Due times are compared against the database clock, not against each dispatcher clock. Lease safety comes from the epoch check, not from clocks; clock skew only shifts when a job is seen as due.',
@@ -397,7 +823,7 @@ export const jobScheduler: Design = {
       'Exactly-once execution. A worker can finish the side effect and die before recording the result, and the retry runs the job again.',
       'An exact start time. The target is a start within a few seconds at P95; a dispatcher failover adds up to one lease period, and a burst larger than the worker pool adds queue time.',
       'Ordering. Runs of different jobs start in any order, and a slow or retried run of a recurring job can overlap the next occurrence of the same job.',
-      'That cancel or pause stops a run already in progress. They only prevent future claims.',
+      'That cancel stops a run in progress at once. Pause only prevents future claims; cancel with stopRunning stops a run at its next checkpoint, and a job that never checkpoints runs to its timeout.',
       'That every missed occurrence runs after an outage. That depends on the catch-up policy of the job.',
     ],
   },
@@ -407,7 +833,7 @@ export const jobScheduler: Design = {
       impact:
         'Jobs in those partitions stop being claimed. Nothing is lost, because unclaimed jobs are still rows in the table, but they start up to one lease period late (about 10 s with a 10 s lease).',
       detection:
-        'The lease is not renewed. A per-partition metric, the age of the oldest due job that is still unclaimed, crosses its alarm threshold of a few seconds.',
+        'The lease is not renewed. A per-partition metric, the age of the oldest due job that is still unclaimed, crosses its alarm threshold of 10 s.',
       recovery:
         'Another dispatcher takes the expired lease with a higher epoch and claims the backlog on its next poll. If the old dispatcher was only paused and wakes up, its claim transaction fails the epoch check and it drops the partition.',
     },
@@ -428,7 +854,7 @@ export const jobScheduler: Design = {
       detection:
         'Heartbeats stop. After three missed intervals (about 30 s at one every 10 s) the run is declared lost. A counter of lost runs per job type shows a handler that hangs.',
       recovery:
-        'The attempt number is increased and the run is enqueued again with backoff. The attempt number acts as the fencing token: the result of the old attempt is rejected by the scheduler, and the systems the job calls dedupe on the run id. The run ends recorded once, and its external effects happen once as long as those systems honor the key.',
+        'The scheduler marks the attempt lost, increases the attempt number and sends a new message for the run with a backoff delay; the old message is deleted. The attempt number acts as the fencing token: the result of the old attempt is rejected by the scheduler, and the systems the job calls dedupe on the run id. The run ends recorded once, and its external effects happen once as long as those systems honor the key.',
     },
     {
       scenario: 'The queue delivers the same run twice, or a retry overtakes the original message.',
@@ -446,7 +872,7 @@ export const jobScheduler: Design = {
       detection:
         'Database health checks, the API error rate and the unclaimed-age metric on every partition at once. The overdue alarm fires for affected jobs.',
       recovery:
-        'The synchronous replica is promoted with every acknowledged job and claim. Dispatchers renew or retake their leases, the due backlog drains as a small burst, callers retry their POST with the same idempotency key, and workers retry their result write. Runs that were declared lost in the meantime are retried, which the run id makes harmless.',
+        'A replica is promoted; it reads the same quorum storage, so it has every acknowledged job and claim. Dispatchers renew or retake their leases, the due backlog drains as a small burst, callers retry their POST with the same idempotency key, and workers retry their result write. Runs that were declared lost in the meantime are retried, which the run id makes harmless.',
     },
     {
       scenario:
@@ -475,7 +901,7 @@ export const jobScheduler: Design = {
       },
       {
         label: 'Peak second',
-        value: '50K runs/s, ~40x average',
+        value: '50K runs/s, ~43x average',
         math: '50,000 due at midnight ÷ 1,160/s average ≈ 43',
       },
       {
@@ -500,18 +926,179 @@ export const jobScheduler: Design = {
       },
     ],
     implications: [
-      'The peak is about 40 times the average, so every tier is sized or pre-scaled for the burst, and the lateness target is checked at midnight, not on a daily average.',
+      'The peak is about 43 times the average, so every tier is sized or pre-scaled for the burst, and the lateness target is checked at midnight, not on a daily average.',
       'A single dispatcher that claims one row per transaction is 250 times too slow for the peak second. That forces both partitions, for parallel claims, and batched claims that skip locked rows.',
       'The workload is write-heavy: each run costs about four row writes and almost no reads beyond the due poll. Read replicas do not help; the write throughput of the primary sets the limit, and 100K row writes in one second is only feasible in a few hundred batched transactions.',
-      'Jobs and their due index (about 50 GB and a few GB) fit one database shard with the index in memory, so polling stays cheap. History is 20 times larger and append-only, so it lives in its own time-partitioned store and expires by dropping whole days.',
+      'Jobs and their due index (about 50 GB and a few GB) fit one database shard with the index in memory, so polling stays cheap. History is 20 times larger and append-only, so it lives in its own append-friendly store, DynamoDB on AWS, and expires through a 30-day TTL.',
       'Worker demand jumps 20 times in one second, faster than scaling on queue depth can react. The due index already knows how many jobs come due in the next minutes, so workers are added before the peak instead of after it.',
       'The partition count is fixed and much larger than the dispatcher count (for example 256 partitions for 4 dispatchers), so dispatchers can be added by moving leases, with no rehash of jobs.',
     ],
   },
+  infrastructure: {
+    provider: 'AWS',
+    intro:
+      'One concrete way to run this design on AWS, in one region across three Availability Zones. The services below are examples that fit, not the only option.',
+    items: [
+      {
+        part: 'Scheduler API',
+        service: 'Application Load Balancer and Amazon ECS on AWS Fargate',
+        why: 'A stateless HTTP API that validates, checks the caller’s identity and writes one row; it scales on request count.',
+        watch:
+          'ALB HTTPCode_Target_5XX_Count and TargetResponseTime; custom: POSTs answered from an existing idempotency key.',
+      },
+      {
+        part: 'Jobs, runs and leases',
+        service: 'Amazon Aurora PostgreSQL, one writer and a replica in another zone',
+        why: 'FOR UPDATE SKIP LOCKED, unique keys and one transaction for claim, run record, next run and lease epoch. Every commit is stored on a quorum of copies across three zones before it is acknowledged.',
+        watch:
+          'CommitLatency, CommitThroughput, CPUUtilization, DatabaseConnections, Deadlocks; custom: oldest unclaimed due job per partition.',
+      },
+      {
+        part: 'Dispatchers',
+        service: 'Amazon ECS service, a few tasks holding 256 partition leases',
+        why: 'Long-running loops that poll every second; adding a task moves leases, never jobs.',
+        watch: 'Custom: claims per second, lease renewals and takeovers, claim transaction time.',
+      },
+      {
+        part: 'Work queue',
+        service: 'Amazon SQS standard queue, messages carry only the run id',
+        why: 'At-least-once delivery with no throughput ceiling, a visibility timeout per message, and delays for backoff.',
+        watch:
+          'ApproximateAgeOfOldestMessage, ApproximateNumberOfMessagesVisible, NumberOfMessagesSent against NumberOfMessagesDeleted.',
+      },
+      {
+        part: 'Workers',
+        service:
+          'Amazon ECS on Fargate, or on EC2 for the peak, scaled on queue depth plus scheduled scale-out',
+        why: 'Jobs may run longer than a function allows, and the midnight peak needs about 1,000 workers added before 00:00, not after.',
+        watch:
+          'ECS RunningTaskCount against desired; custom: start lateness P95, lost runs and duplicates dropped per job type.',
+      },
+      {
+        part: 'Sweeper',
+        service: 'A small always-on Amazon ECS task',
+        why: 'It scans for runs dispatched but not started every few seconds, finer than the one-minute minimum of EventBridge schedules.',
+        watch: 'Custom: runs re-enqueued per minute.',
+      },
+      {
+        part: 'Run history',
+        service:
+          'Amazon DynamoDB: job id as partition key, scheduled time and attempt as sort key, TTL of 30 days',
+        why: 'Append-only and twenty times larger than the jobs; one query answers GET /jobs/{id}/runs, and expired items delete themselves.',
+        watch: 'WriteThrottleEvents and ConsumedWriteCapacityUnits, which jump at midnight.',
+      },
+      {
+        part: 'Dead letters',
+        service: 'An SQS dead-letter queue, with a CloudWatch alarm routed to the owning team',
+        why: 'Runs past their last attempt wait there with their error until the team fixes and replays them.',
+        watch: 'ApproximateNumberOfMessagesVisible on the dead-letter queue, by job type.',
+      },
+      {
+        part: 'Reconciler',
+        service: 'Amazon EventBridge Scheduler, hourly, starting a task on Amazon ECS',
+        why: 'An hourly check is the kind of timer a managed schedule handles well; it compares due occurrences with run records.',
+        watch:
+          'Custom: missing runs found per hour, and the reconciler’s own duration and failures.',
+      },
+      {
+        part: 'Security',
+        service: 'IAM roles per service and per job type, AWS KMS, AWS Secrets Manager',
+        why: 'Callers sign requests with their own identity, workers assume the role of the job type, payloads hold secret names that are resolved at run time, and data is encrypted at rest.',
+        watch: 'AWS CloudTrail for denied calls, and the API’s rejected ownership checks.',
+      },
+      {
+        part: 'Observability and cost',
+        service: 'Amazon CloudWatch dashboards and alarms, AWS Cost Explorer',
+        why: 'One dashboard with the SLOs below. The bill is mostly the workers held for the peak and Aurora’s writes, so flattening the midnight spike is also a cost lever.',
+        watch: 'The SLO dashboard, and workers, Aurora and SQS as separate lines in Cost Explorer.',
+      },
+    ],
+    limits: [
+      'EventBridge schedules run at most once a minute, so anything that must poll every few seconds, like the sweeper, runs as a small always-on task.',
+      'An SQS message is at most 256 KB and its visibility timeout at most 12 hours, so messages carry the run id and long jobs extend their visibility while they heartbeat.',
+      'SQS standard queues deliver at least once and do not keep order, which the conditional start and the run id already handle.',
+      'An Aurora failover takes tens of seconds, during which nothing can be claimed; the design treats it as a late start, not a loss.',
+      'AWS Lambda stops a function after 15 minutes, so workers run on ECS; a job type that always finishes in seconds could use Lambda.',
+    ],
+  },
+  slos: [
+    {
+      objective: 'Start on time',
+      target: '95% of runs start within 5 s of their scheduled time, measured at midnight too',
+      measure:
+        'Start lateness, the worker’s start time minus the scheduled time, from the run records.',
+    },
+    {
+      objective: 'No lost jobs',
+      target: 'Every acknowledged job and every due occurrence has a run record',
+      measure:
+        'A reconciliation job compares due occurrences with run records per hour; any gap pages.',
+    },
+    {
+      objective: 'Every run accounted for',
+      target: '99.9% of runs reach succeeded, dead-lettered or cancelled within their retry window',
+      measure: 'Runs still dispatched or running past their window, from the runs table.',
+    },
+    {
+      objective: 'Scheduling API',
+      target: '99.9% of POST /jobs succeed, 99% within 300 ms',
+      measure: 'ALB 5XX count and target response time on the API.',
+    },
+  ],
+  alarms: [
+    {
+      name: 'Partition not claiming',
+      metric: 'Custom: oldest unclaimed due job above 10 s in any partition',
+      meaning:
+        'A dispatcher died or lost its lease and no one took it yet, or the database cannot take claims.',
+    },
+    {
+      name: 'Runs starting late',
+      metric:
+        'Custom: start lateness P95 above 30 s, or SQS ApproximateAgeOfOldestMessage above 30 s',
+      meaning:
+        'Dispatch is fine but workers are short: scale out, or a job type is hogging the pool.',
+    },
+    {
+      name: 'Lost dispatches',
+      metric: 'Custom: runs re-enqueued by the sweeper above a steady baseline',
+      meaning: 'Dispatchers crash between commit and enqueue, or SQS is rejecting sends.',
+    },
+    {
+      name: 'Workers dying mid-run',
+      metric: 'Custom: runs declared lost per job type above zero for 5 minutes',
+      meaning:
+        'A handler hangs or crashes; its retries are safe only if the job honors the run id.',
+    },
+    {
+      name: 'New dead letters',
+      metric: 'SQS ApproximateNumberOfMessagesVisible on the dead-letter queue above zero',
+      meaning: 'A job exhausted its attempts; the owning team fixes the cause and replays it.',
+    },
+    {
+      name: 'Missing runs',
+      metric:
+        'Custom: occurrences without a run record found by the hourly reconciliation, above zero',
+      meaning:
+        'The reconciler repaired them, but something skipped a run: a claim bug or a wrong schedule. Find it before it repeats.',
+    },
+    {
+      name: 'Tenant over its cap',
+      metric: 'Custom: runs delayed by a per-tenant concurrency cap for more than 5 minutes',
+      meaning:
+        'One tenant is scheduling beyond its quota; its runs are late by design, and the others are protected.',
+    },
+    {
+      name: 'Database saturated',
+      metric: 'Aurora CommitLatency above 20 ms, or CPUUtilization above 75% at the midnight peak',
+      meaning:
+        'The primary, the first bottleneck, is near its limit; batch claims harder or split partitions across clusters.',
+    },
+  ],
   evolution: {
     mvp: 'One database with a replica and one dispatcher with a warm standby, polling every second with batched claims. Workers pull runs straight from the runs table with a row lock that skips locked rows, so there is no separate queue, no partitions and no leases beyond the single leader. History stays in the same database. This is enough for a few hundred runs a second and keeps every guarantee except fast failover.',
     atScale: [
-      'At 10x (1 billion runs a day, 500K in the peak second) the primary cannot absorb the claim burst. The jobs table is split across several database clusters by partition, each with its own dispatchers, and history moves to a store built for appends.',
+      'At 10x (1 billion runs a day, 500K in the peak second) the primary cannot absorb the claim burst. The jobs table is split across several database clusters by partition, each with its own dispatchers; history is already in its own store and scales by adding partitions to it.',
       'At 10x the midnight spike is also worth flattening at the source: jobs that do not need the exact second opt into a jitter window, which spreads the claims and the worker demand over a minute.',
       'At 100x polling an index every second is the wrong shape. Jobs far in the future move to time-bucketed storage, and each partition loads the next few minutes into memory and fires from a timing wheel, with the bucket as the durable copy.',
       'At 100x one tenant can swamp the rest, so queues, concurrency limits and worker pools are split per tenant or per priority class.',
@@ -523,7 +1110,7 @@ export const jobScheduler: Design = {
       'Exactly-once execution through distributed transactions with the systems a job calls. At least once with the run id as key gives the same effect; it would only be worth it for a target that cannot dedupe, and then a per-target outbox is the cheaper answer.',
       'In-memory timing wheels and delay queues. They give sub-second precision, but make cancel and reschedule hard; worth adding when jobs need precision below the one-second poll or polling becomes the bottleneck.',
       'Dependencies between jobs. A workflow engine needs durable state per step and is a different product; worth adding as a layer on top when teams start chaining jobs through payloads.',
-      'Priorities and fairness between tenants. One shared queue is easier to operate; add them when one job type or tenant can delay the rest.',
+      'Strict priorities with preemption. Two weighted queues and per-tenant caps cover the need; stopping running jobs to make room for urgent ones is worth it only for hard real-time work.',
       'A no-overlap rule for runs of the same job. It needs a lock per job held across the whole run; add it as an opt-in when jobs that are not safe to run concurrently appear.',
     ],
   },
