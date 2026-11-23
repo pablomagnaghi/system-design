@@ -4,7 +4,7 @@ export const urlShortener: Design = {
   slug: 'url-shortener',
   title: 'URL shortener',
   summary:
-    'Turn long links into short codes and redirect every click in about ten milliseconds, with codes that never collide, reads that scale far beyond writes and click counts that never slow a redirect down.',
+    'Turn long links into short codes and redirect most clicks in under ten milliseconds, with codes that never collide, reads that scale far beyond writes and click counts that never slow a redirect down.',
   difficulty: 'Easy',
   minutes: 8,
   requirements: {
@@ -14,7 +14,7 @@ export const urlShortener: Design = {
       'Show the owner how many times a link was clicked.',
     ],
     nonFunctional: [
-      'Redirects in about ten milliseconds at the server (p95), at a peak of about a hundred thousand per second.',
+      'Redirects in under ten milliseconds at the server (p95), at a peak of about a hundred thousand per second.',
       'Reads outnumber writes by about a hundred to one; billions of links stored over time.',
       'Codes are unique and short: seven characters or fewer.',
       'Redirects stay up even when link creation or analytics are degraded.',
@@ -135,9 +135,9 @@ export const urlShortener: Design = {
       {
         title: 'Ask for a short link',
         narration:
-          'A client posts a long URL to the gateway, which checks the caller and its rate limit and forwards the request to the shorten service. The service validates the URL and normalizes it.',
+          'A client posts a long URL to the gateway, which forwards the request to the shorten service; between them they check the caller and its rate limit. The service validates the URL and normalizes it.',
         tradeoff:
-          'Rate limiting at the gateway keeps one script from burning through the code space or flooding the store. Putting create and redirect behind separate services lets the read path scale on its own, at the cost of two deployments instead of one.',
+          'Rate limiting each caller keeps one script from burning through the code space or flooding the store. Putting create and redirect behind separate services lets the read path scale on its own, at the cost of two deployments instead of one.',
         nodes: ['client', 'gateway', 'shorten'],
         travel: [
           ['client', 'gateway'],
@@ -174,9 +174,9 @@ export const urlShortener: Design = {
       {
         title: 'A click arrives',
         narration:
-          'Someone opens the short link. The gateway sends the request to the redirect service, a stateless fleet that does nothing but turn codes into URLs. For now it reads the code straight from the link store.',
+          'Someone opens the short link. Redirects arrive on their own hostname and load balancer, drawn here as the same gateway box, which sends the request to the redirect service, a stateless fleet that does nothing but turn codes into URLs. For now it reads the code straight from the link store.',
         tradeoff:
-          'Keeping the redirect path tiny and stateless makes it cheap to scale out and easy to keep up, even when link creation is having trouble. The price is a little duplicated plumbing, such as auth and config, across two services.',
+          'Keeping the redirect path tiny and stateless makes it cheap to scale out and easy to keep up, even when link creation is having trouble. The price is a little duplicated plumbing, such as config and deployment, across two services.',
         nodes: ['client', 'gateway', 'redirect', 'store'],
         travel: [
           ['client', 'gateway'],
@@ -225,25 +225,28 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '8 ms',
-          errorRate: '0.01%',
+          p95Latency: '5 ms',
+          errorRate: '0.001%',
         },
         load: { redirect: 45, cache: 35, store: 8 },
       },
       {
         title: 'Miss: read the store and fill',
         narration:
-          'On a miss, the code is read from the link store and written into the cache. Unknown codes are cached too, as a short-lived "not found", so repeated bad codes do not reach the store.',
+          'On a miss, the redirect service itself reads the code from the link store and writes it into the cache; the cache never calls the store, and the miss edge is drawn from the cache only because the lookup carries on past it. Unknown codes are cached too, as a short-lived "not found", so repeated bad codes do not reach the store.',
         tradeoff:
-          'Read-through keeps the cache filled with exactly what people click. Negative caching protects the store from scanners guessing codes, at the risk of a brand new link answering 404 for up to 30 seconds if someone guessed it before it was created.',
-        nodes: ['cache', 'store'],
-        travel: [['cache', 'store', 'miss']],
+          'Filling on a miss (cache-aside) keeps the cache filled with exactly what people click. Negative caching protects the store from scanners guessing codes, at the risk of a brand new link answering 404 for up to 30 seconds if someone guessed it before it was created.',
+        nodes: ['redirect', 'cache', 'store'],
+        travel: [
+          ['redirect', 'cache'],
+          ['cache', 'store', 'miss'],
+        ],
         short: 'Cache miss',
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '9 ms',
-          errorRate: '0.01%',
+          p95Latency: '6 ms',
+          errorRate: '0.001%',
         },
         load: { cache: 38, store: 12 },
       },
@@ -259,8 +262,8 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '9 ms',
-          errorRate: '0.01%',
+          p95Latency: '6 ms',
+          errorRate: '0.001%',
         },
         load: { redirect: 45 },
       },
@@ -279,17 +282,17 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '9 ms',
-          errorRate: '0.01%',
+          p95Latency: '6 ms',
+          errorRate: '0.001%',
         },
         load: { redirect: 45, clicks: 40, counts: 20 },
       },
       {
         title: 'Take a link down',
         narration:
-          'A link turns out to point at a phishing page. The owner, or the trust team through an audited admin role, deletes it. The shorten service first queues a delayed follow-up message, then marks the link deleted in the store, then overwrites its cache entry with a "deleted" marker instead of removing the key. Redirects answer 410 Gone once the local caches age out, within seconds. Ten seconds later a worker takes the follow-up, writes the marker again and confirms the 410 with a request through the redirect path.',
+          'A link turns out to point at a phishing page. The owner, or the trust team through an audited admin role, deletes it. The shorten service first queues a delayed follow-up message, then marks the link deleted in the store, then overwrites its cache entry with a "deleted" marker instead of removing the key. Redirects answer 410 Gone once the local caches age out, within seconds. Ten seconds later a worker takes the follow-up from its queue (neither is drawn), writes the marker again and confirms the 410 with a request through the redirect path.',
         tradeoff:
-          'Caching links for 6 hours is what makes redirects cheap, so a takedown needs its own careful path. Overwriting instead of removing the key means a fill racing with the delete finds the key present and cannot bring the old URL back, because fills only add absent keys. The store write and the cache write are two steps that a crash can separate, so the follow-up is queued before either. It is delivered at least once, made harmless because the marker write and the check are idempotent, and it alarms when its retries run out, since a lost invalidation would let the link work until the TTL ends.',
+          'Caching links for 6 hours is what makes redirects cheap, so a takedown needs its own careful path. Overwriting instead of removing the key means a fill racing with the delete finds the key present and cannot bring the old URL back, because fills only add absent keys. The store write and the cache write are two steps that a crash can separate, so the follow-up is queued before either. It is delivered at least once, made harmless because the marker write and the check are idempotent, and after three tries it moves to a dead-letter queue that alarms, since a lost invalidation would let the link work until the TTL ends.',
         nodes: ['gateway', 'shorten', 'store', 'cache'],
         travel: [
           ['gateway', 'shorten'],
@@ -300,8 +303,8 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '9 ms',
-          errorRate: '0.01%',
+          p95Latency: '6 ms',
+          errorRate: '0.001%',
         },
         load: { shorten: 15, store: 12, cache: 38 },
       },
@@ -317,8 +320,8 @@ export const urlShortener: Design = {
         metrics: {
           users: '10M',
           requestsPerSecond: '100K',
-          p95Latency: '9 ms',
-          errorRate: '0.01%',
+          p95Latency: '6 ms',
+          errorRate: '0.001%',
         },
       },
     ],
@@ -343,7 +346,7 @@ export const urlShortener: Design = {
           from: 'ana',
           to: 'alb',
           label: 'POST /links {url, expiry}',
-          note: 'Creation needs a signed-in user or an API key, and is rate limited per caller so one script cannot flood the store or burn ranges.',
+          note: 'Creation needs a signed-in user, who comes through the Cognito sign-in at the load balancer, or an API key, which matches a listener rule without the sign-in and is verified by the shorten service itself. It is rate limited per caller so one script cannot flood the store or burn ranges.',
         },
         {
           from: 'alb',
@@ -402,14 +405,14 @@ export const urlShortener: Design = {
         {
           from: 'edge',
           to: 'redir',
-          label: 'forward via the ALB',
-          note: 'The redirect fleet is separate from the shorten service, so a problem in creation never touches clicks.',
+          label: 'forward via the redirect ALB',
+          note: 'The redirect fleet is separate from the shorten service and has its own load balancer, so a problem in creation never touches clicks.',
         },
         {
           from: 'redir',
           to: 'cache',
           label: 'GET link:k3XbQ9a (local miss)',
-          note: 'The local cache holds the hottest codes for a few seconds; this code is not one of them. The shared cache answers about 95% of what reaches it.',
+          note: 'The local cache holds the hottest codes for a few seconds; this code is not one of them. The local and shared caches together answer about 95% of clicks.',
         },
         {
           from: 'cache',
@@ -468,7 +471,7 @@ export const urlShortener: Design = {
         {
           from: 'links',
           to: 'redir',
-          label: '{url, expiresAt} or nothing',
+          label: '{url, expiresAt}, a tombstone or nothing',
           note: 'Partitioned by code, so the lookup is one item from one partition.',
           style: 'reply',
         },
@@ -476,7 +479,7 @@ export const urlShortener: Design = {
           from: 'redir',
           to: 'cache',
           label: 'SET NX link:Zq81mPw, TTL 6 h (or "none", TTL 30 s)',
-          note: 'Only adds a key that is absent, so a late fill can never overwrite a "deleted" marker written by a takedown.',
+          note: 'Only adds a key that is absent, so a late fill can never overwrite a "deleted" marker written by a takedown. A tombstone is cached as that same "deleted" marker for 6 hours; only a code with no item gets the 30-second "none".',
         },
       ],
     },
@@ -486,7 +489,8 @@ export const urlShortener: Design = {
       kind: 'queue',
       summary:
         'Aggregators read the click stream, sum clicks per code over a few seconds and write the totals together with the stream position they reached, in one transaction that commits only if the position has not moved.',
-      runsOn: 'Kinesis Data Streams → aggregator on ECS (KCL) → Aurora PostgreSQL → stats endpoint',
+      runsOn:
+        'Kinesis Data Streams → aggregator on ECS (KCL, polling) → Aurora PostgreSQL → stats endpoint',
       participants: [
         { id: 'stream', label: 'Click stream', service: 'Kinesis Data Streams' },
         { id: 'agg', label: 'Aggregator', service: 'ECS, one worker per shard' },
@@ -511,7 +515,7 @@ export const urlShortener: Design = {
           from: 'agg',
           to: 'db',
           label: 'BEGIN; upsert counts; UPDATE offsets SET seq=:new WHERE seq=:start; COMMIT',
-          note: 'The stream position advances in the same transaction as the counts, and only if it still equals the position this batch started from (WHERE shard=:s AND seq=:start). Two workers can hold one shard for a moment while it moves between them; the slower one updates zero rows and rolls back, so a batch is never added twice. After a crash the worker resumes from the stored position and skips records at or below it, so none is skipped either.',
+          note: 'The stream position advances in the same transaction as the counts, and only if it still equals the position this batch started from (WHERE shard=:s AND seq=:start). Two workers can hold one shard for a moment while it moves between them; the slower one updates zero rows and rolls back, so a batch is never added twice. After a crash the worker resumes from the stored position and skips records at or below it, so none is skipped either. A batch always ends on a whole Kinesis record, so a record that packs many events is counted in full or not at all.',
         },
         {
           from: 'ana',
@@ -527,7 +531,8 @@ export const urlShortener: Design = {
       kind: 'async',
       summary:
         'A link turns out to point at a phishing page. The delete queues a delayed follow-up, marks the link in the store and writes a "deleted" marker over the cached entry. The follow-up repeats the marker and checks a few seconds later that the redirect now fails.',
-      runsOn: 'Shorten service on ECS → SQS (delayed follow-up) → DynamoDB → ElastiCache',
+      runsOn:
+        'Shorten service on ECS → SQS (delayed follow-up, dead-letter queue) → DynamoDB → ElastiCache',
       participants: [
         { id: 'owner', label: 'Owner or trust team', service: 'Client' },
         { id: 'svc', label: 'Shorten service', service: 'ECS Fargate' },
@@ -552,19 +557,19 @@ export const urlShortener: Design = {
           from: 'svc',
           to: 'links',
           label: 'UpdateItem deleted=true, remove url',
-          note: 'The store before the cache, so any later miss reads the deleted state. The item stays as a tombstone: the code answers 410 and is never reused.',
+          note: 'The store before the cache, so any later miss reads the deleted state. The item stays as a tombstone: the code answers 410 and is never reused. The write has a 2-second deadline, far inside the 30 seconds the follow-up keeps trying.',
         },
         {
           from: 'svc',
           to: 'cache',
-          label: 'SET link:k3XbQ9a "deleted"',
+          label: 'SET link:k3XbQ9a "deleted", TTL 6 h',
           note: 'Overwrites instead of removing the key, so a fill racing with the delete finds the key present and cannot bring the old URL back. If this write fails, the follow-up repeats it.',
         },
         {
           from: 'retry',
           to: 'svc',
           label: 'after 10 s: SET marker again, GET /k3XbQ9a expects 410',
-          note: 'A worker reads the row with a consistent read; if it is not deleted, the delete failed and the message is dropped. Otherwise it writes the marker again and requests the code through the redirect path, where local caches have aged out by then. The message is removed only on a 410, so it is delivered at least once, made harmless because both actions are idempotent. Retries exhausted raise an alarm, since the fallback bound is the 6-hour TTL.',
+          note: 'A worker reads the row with a consistent read. If it is deleted, the worker writes the marker again and requests the code through the redirect path, where local caches have aged out by then, and removes the message only on a 410. If it is not deleted, the store write may still be in flight, so the message is left for its next receive. SQS delivers it up to 3 times, 10 s apart; a row still not deleted on the third means the delete failed, and the worker removes the message. A message that never sees a 410 moves to a dead-letter queue, which raises the alarm, since the fallback bound is the 6-hour TTL. Delivery is at least once, made harmless because both actions are idempotent.',
           style: 'async',
         },
       ],
@@ -700,7 +705,7 @@ export const urlShortener: Design = {
     },
   ],
   wrapUp:
-    'Leased ID ranges encoded in base 62 for collision-free codes, a key-value store by code, a read-through cache with negative entries in front of it, 302 redirects from a stateless fleet, and click counting through a stream that never slows a redirect.',
+    'Leased ID ranges encoded in base 62 for collision-free codes, a key-value store by code, a cache filled on misses, with negative entries, in front of it, 302 redirects from a stateless fleet, and click counting through a stream that never slows a redirect.',
   guarantees: {
     provides: [
       {
@@ -716,7 +721,7 @@ export const urlShortener: Design = {
       {
         property: 'Redirect freshness',
         promise:
-          'Redirects are eventually consistent with bounded staleness. Expiry is enforced on every read, cached or not, to within clock skew. A deleted link stops redirecting once the shared entry is invalidated and the local caches age out, which is seconds; if the cache cannot be written and the queued follow-up runs out of retries, the bound is the shared TTL of 6 hours.',
+          'Redirects are eventually consistent with bounded staleness. Expiry is enforced on every read, cached or not, to within clock skew. A deleted link stops redirecting once the shared entry is invalidated and the local caches age out, which is seconds; if the cache cannot be written and the queued follow-up uses up its three tries, the bound is the shared TTL of 6 hours.',
       },
       {
         property: 'Click counting',
@@ -750,7 +755,7 @@ export const urlShortener: Design = {
       impact:
         'The clicks that node answered become store reads. Losing the entire cache sends close to the full click rate to a store sized for the miss rate, so latency climbs and some redirects time out, as in the viral stage.',
       detection:
-        'Cache hit ratio falling below its normal band, with store read latency and throttled reads rising at the same time.',
+        'The share of redirects the redirect service answers without a store read falling below 90%, with a failed cache read counted as a miss, and store read latency and throttled reads rising at the same time.',
       recovery:
         'A node loss affects only that shard’s slots, and its replica takes over with whatever was replicated. Local caches keep the hottest codes for a few seconds, each redirect server collapses concurrent misses for one code into a single store read, and a cap on in-flight store reads sheds the excess as fast errors. The cache refills from clicks within minutes; no data is lost because the cache holds nothing the store does not.',
     },
@@ -762,14 +767,14 @@ export const urlShortener: Design = {
       detection:
         'A gap between IDs leased and links stored, tracked as a ratio. It needs no alarm unless it grows, which would point at a crash loop burning ranges.',
       recovery:
-        'The restarted server leases a fresh range; the old one is never reissued. The orphan link is valid and harmless and stays until it expires. A caller that cannot tolerate duplicates sends an idempotency key, stored with the link and checked on retry.',
+        'The restarted server leases a fresh range; the old one is never reissued. The orphan link is valid and harmless and stays until it expires. A caller that cannot tolerate duplicates sends an idempotency key: before the link, the server writes an item keyed by caller and key that holds the chosen code, with a put-if-absent, and a retry that finds that item reuses its code, so the link is written once.',
     },
     {
       scenario: 'The allocator fails over to a replica.',
       impact:
         'Shorten servers keep creating from the ranges they already hold, which at 400 creates a second lasts tens of seconds, a minute or two at best, then creates fail; redirects are unaffected. If the high-water mark were replicated asynchronously, the new primary could issue a range a second time.',
       detection:
-        'Lease error rate and lease latency for the outage. For a reissued range, a counter of put-if-absent conflicts on generated codes, which is otherwise near zero and alarms on any burst.',
+        'Lease error rate and lease latency for the outage, and the creation alarm once the held ranges run out and creates start failing. For a reissued range, a counter of put-if-absent conflicts on generated codes, which is otherwise near zero and alarms on any burst.',
       recovery:
         'Because every increment is acknowledged by a quorum, the new primary continues from the last recorded mark. If a range is reissued anyway, the conditional insert rejects each duplicate, the server abandons the range and leases another, and no link is overwritten.',
     },
@@ -779,9 +784,9 @@ export const urlShortener: Design = {
       impact:
         'The link keeps redirecting from the shared cache, for up to the 6-hour TTL. For a takedown of a harmful target, that is the worst case that matters.',
       detection:
-        'The queued follow-up of the delete flow, which requests the code through the redirect path about ten seconds later and expects a 410, plus a count of follow-ups that exhausted their retries.',
+        'The queued follow-up of the delete flow, which requests the code through the redirect path about ten seconds later and expects a 410, plus the alarm on any message in the follow-up dead-letter queue, where a follow-up lands after three tries without a 410.',
       recovery:
-        'The delete queues its follow-up before it touches the store, so a crash between the store write and the cache write cannot lose the invalidation. It then marks the row deleted in the store and overwrites the cache entry with a "deleted" marker instead of removing the key, and fills only add a key that is absent, so a late fill cannot replace the marker. The follow-up writes the marker again and is retried until the redirect path answers 410. Local caches clear on their own within seconds.',
+        'The delete queues its follow-up before it touches the store, so a crash between the store write and the cache write cannot lose the invalidation. It then marks the row deleted in the store and overwrites the cache entry with a "deleted" marker instead of removing the key, and fills only add a key that is absent, so a late fill cannot replace the marker. The follow-up writes the marker again and is tried up to 3 times, 10 s apart, until the redirect path answers 410; after that it sits in the dead-letter queue and someone fixes the cache entry by hand. Local caches clear on their own within seconds.',
     },
     {
       scenario: 'The click stream is unavailable or slow to accept events.',
@@ -797,16 +802,16 @@ export const urlShortener: Design = {
       impact:
         'Stats stop advancing or lag by minutes instead of seconds. No redirect is affected and no event is lost while the stream retains it.',
       detection:
-        'Consumer lag per partition, alarmed well before it approaches the stream’s retention period.',
+        'The stream’s iterator age, alarmed at 30 s, far below the 7-day retention. Missing data counts as breaching, because dead aggregators make no GetRecords calls and the metric stops. The counts lag behind the stream, alarmed per shard at the same 30 s, catches one worker stuck on its shard.',
       recovery:
-        'A restarted consumer resumes from the offset stored with the counts, so a batch that was applied is not applied again and one that was not is replayed. If two workers hold the same shard for a moment, the conditional offset update lets only one of them commit. Lag is worked off by adding consumers up to the partition count.',
+        'A restarted consumer resumes from the offset stored with the counts, so a batch that was applied is not applied again and one that was not is replayed. If two workers hold the same shard for a moment, the conditional offset update lets only one of them commit. Lag is worked off with the headroom each worker has, about 10K events a second against the 6,250 a shard receives at peak; past that, shards are split and each new shard gets a worker.',
     },
   ],
   capacity: {
     assumptions: [
       'About 400 new links per second on average, and 100 clicks for every link created.',
       'Peak click rate is about 2.5 times the average, driven by viral links rather than time of day.',
-      'A stored link takes about 500 bytes (a long URL, metadata and store overhead), kept for five years with three replicas.',
+      'A stored link takes about 500 bytes (a long URL, metadata and store overhead), accumulated over five years with three replicas.',
       'About 100 million distinct codes are clicked on a given day, and a cached entry takes about 300 bytes.',
       'A click event is about 100 bytes and the stream retains seven days.',
       'A redirect server handles about 5,000 requests per second when most are cache hits.',
@@ -871,9 +876,10 @@ export const urlShortener: Design = {
       {
         part: 'Gateway',
         service:
-          'Application Load Balancer with path rules and an AWS WAF rate-based rule; Amazon Cognito for creators',
-        why: 'POST /links goes to the shorten service and /{code} to the redirect fleet, so the two scale and fail separately. An ALB does not rate limit, so the limit has two layers: the WAF rule caps each source IP, and the shorten service enforces the per-caller limit on the verified user ID or API key.',
-        watch: 'TargetResponseTime and HTTPCode_Target_5XX_Count per target group.',
+          'Two Application Load Balancers: one for the link API, with an AWS WAF rate-based rule, and one for redirects behind CloudFront; Amazon Cognito for creators',
+        why: 'The link API (create, delete, stats) has its own hostname and load balancer in front of the shorten service, and the short domain reaches the redirect fleet through the other, so the two scale and fail separately and each has its own error counts. An ALB does not rate limit, so the limit has two layers: the WAF rule caps each source IP, and the shorten service enforces the per-caller limit on the verified user ID or API key.',
+        watch:
+          'On each load balancer: TargetResponseTime, RequestCount, HTTPCode_Target_5XX_Count and HTTPCode_ELB_5XX_Count.',
       },
       {
         part: 'Shorten service',
@@ -900,14 +906,15 @@ export const urlShortener: Design = {
         service:
           'About 30 Amazon ECS tasks on Fargate across three zones, each with a local LRU cache',
         why: 'Stateless and tiny, so it scales on request count; losing one zone still leaves 20 tasks for the peak.',
-        watch: 'p95 and p99 redirect latency from the service, 5xx count, dropped click events.',
+        watch:
+          'p95 and p99 redirect latency from the service, the share of redirects answered without a store read, 5xx count, dropped click events.',
       },
       {
         part: 'Shared cache',
         service:
           'Amazon ElastiCache for Valkey, cluster mode, 4 shards of cache.r7g.large with one replica each',
         why: 'About 30 GB of active codes fits in four nodes of about 10 GB usable each; NX writes and markers give the takedown its safety.',
-        watch: 'CacheHitRate, EngineCPUUtilization per shard (a viral key), Evictions.',
+        watch: 'CacheHitRate and CPUUtilization per node (a viral key), Evictions.',
       },
       {
         part: 'Click stream',
@@ -919,17 +926,18 @@ export const urlShortener: Design = {
       },
       {
         part: 'Aggregator and counts',
-        service: 'Kinesis Client Library workers on Amazon ECS writing to Amazon Aurora PostgreSQL',
-        why: 'Counts and the stream position commit in one transaction, conditional on the position the batch started from, which is what makes replays and overlapping workers harmless.',
-        watch: 'Aurora CommitLatency and the counts lag behind the stream.',
+        service:
+          'Kinesis Client Library workers in polling mode on Amazon ECS writing to Amazon Aurora PostgreSQL',
+        why: 'Counts and the stream position commit in one transaction, conditional on the position the batch started from, which is what makes replays and overlapping workers harmless. The workers poll with GetRecords instead of the enhanced fan-out that current library versions set up by default, so GetRecords.IteratorAgeMilliseconds reports their lag.',
+        watch: 'Aurora CommitLatency and the counts lag behind the stream, per shard.',
       },
       {
         part: 'Security',
         service:
-          'Amazon Cognito, IAM roles per service, AWS KMS, AWS CloudTrail, SQS for takedown follow-ups',
-        why: 'Creators are authenticated; only the redirect fleet reads the cache and only the shorten service writes links; the trust team deletes through an audited admin role; takedowns are logged, and a queued follow-up repeats the invalidation until the redirect path confirms it.',
+          'Amazon Cognito, IAM roles per service, AWS KMS, AWS CloudTrail, Amazon SQS for takedown follow-ups with a dead-letter queue',
+        why: 'Creators are authenticated; only the redirect fleet reads the cache and only the shorten service writes links; the trust team deletes through an audited admin role; takedowns are logged, and a queued follow-up repeats the invalidation, up to three times, until the redirect path confirms it.',
         watch:
-          'Takedown follow-ups that exhausted retries, takedown verification failures, and CloudTrail for admin deletes.',
+          'ApproximateNumberOfMessagesVisible on the follow-up dead-letter queue, ApproximateAgeOfOldestMessage on the follow-up queue, and CloudTrail for admin deletes.',
       },
       {
         part: 'Observability and cost',
@@ -951,31 +959,37 @@ export const urlShortener: Design = {
   slos: [
     {
       objective: 'Redirect latency',
-      target: '95% of redirects under 10 ms and 99% under 50 ms at the service',
-      measure: 'Redirect service latency, split into local hits, cache hits and misses.',
+      target: '95% of redirects under 10 ms and 99% under 50 ms at the service, over 28 days',
+      measure:
+        'ALB TargetResponseTime on the redirect target group, which the load balancer publishes; the service’s own timings split it into local hits, cache hits and misses.',
     },
     {
       objective: 'Redirect availability',
-      target: '99.99% of redirects for existing links answered 302',
-      measure: 'ALB 5XX on the redirect target group over all redirect requests.',
+      target: '99.99% of redirects for existing links answered 302, over 28 days',
+      measure:
+        '(HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / RequestCount on the redirect load balancer. Target counts alone leave out the 502, 503 and 504 the load balancer generates when tasks are down or hung. The load-balancer count has no target group dimension, which is why redirects have a load balancer to themselves. RequestCount counts only requests for which a target was chosen, so a period with no ratio counts as failed.',
     },
     {
       objective: 'Link creation',
-      target: '99.9% of creates succeed within 200 ms',
-      measure: 'ALB metrics on the shorten target group.',
+      target: '99.9% of creates succeed within 200 ms, over 28 days',
+      measure:
+        '(HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / RequestCount, and TargetResponseTime, on the link API load balancer. No redirect passes through it; deletes and stats reads share it and count against the same objective. A period with no ratio counts as failed.',
     },
     {
       objective: 'Stats freshness and takedown',
-      target: '99% of clicks counted within 60 s; 99% of takedowns verified within 1 min',
-      measure: 'Aggregator lag behind the stream, and the takedown verification result.',
+      target:
+        '99% of clicks counted within 60 s; 99% of takedowns verified within 1 min; both over 28 days',
+      measure:
+        'Kinesis GetRecords.IteratorAgeMilliseconds for the aggregators with the counts lag behind the stream per shard, and the time from each delete to its follow-up’s 410.',
     },
   ],
   alarms: [
     {
       name: 'Cache hit rate falling',
-      metric: 'ElastiCache CacheHitRate below 90% for 5 min',
+      metric:
+        'Custom, from the redirect service: redirects answered without a store read (a local or shared cache hit) below 90% for 5 min, missing data treated as breaching',
       meaning:
-        'A lost shard, a cold restart or a scanner; every lost point is about 1,000 store reads a second at peak.',
+        'A lost shard, a cold restart or a scanner; every lost point is about 1,000 store reads a second at peak. The redirect service counts it, and a failed cache read counts as a miss, because ElastiCache publishes CacheHitRate per node and a dead node publishes nothing.',
     },
     {
       name: 'Store throttling',
@@ -984,14 +998,31 @@ export const urlShortener: Design = {
     },
     {
       name: 'Redirect errors',
-      metric: 'HTTPCode_Target_5XX_Count above 0.1% of redirects for 2 min',
-      meaning: 'The read path is failing users; check the cache and the in-flight read cap first.',
+      metric:
+        '(HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / RequestCount on the redirect load balancer above 0.005% for 5 min, missing data treated as breaching',
+      meaning:
+        'The read path is failing users at half the 0.01% the availability objective allows; check the cache and the in-flight read cap first. The sum also counts the errors the load balancer generates when tasks are down or hung, which target counts leave out. RequestCount counts only requests for which a target was chosen, so with the whole fleet gone the ratio has no data, and that counts as breaching.',
+    },
+    {
+      name: 'Redirects slowing',
+      metric:
+        'ALB TargetResponseTime on the redirect target group: p95 above 8 ms or p99 above 40 ms for 5 min',
+      meaning:
+        'Latency is drifting toward the 10 ms and 50 ms objectives, usually from more misses or a hot cache shard. The load balancer publishes it, so it does not depend on the fleet reporting.',
+    },
+    {
+      name: 'Creates failing or slow',
+      metric:
+        'On the link API load balancer: (HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / RequestCount above 0.05% for 5 min, missing data treated as breaching, or TargetResponseTime p99.9 above 150 ms for 5 min',
+      meaning:
+        'Creation is heading for its 99.9% within 200 ms objective: the allocator, the link store or the shorten tasks. No redirect passes through this load balancer, so redirect errors cannot trip it, and with no shorten task to reach the ratio has no data, which counts as breaching.',
     },
     {
       name: 'Counts falling behind',
-      metric: 'Kinesis GetRecords.IteratorAgeMilliseconds above 60 s for 5 min; pages above 5 min',
+      metric:
+        'Kinesis GetRecords.IteratorAgeMilliseconds above 30 s for 2 min, or the custom counts lag behind the stream above 30 s on any shard for 2 min; missing data treated as breaching on both',
       meaning:
-        'Aggregators are down or too few; the 60-second freshness objective is being missed and stats are stale, but nothing is lost within 7 days.',
+        'Aggregators are down, too few, or one is stuck on its shard. It fires at half the 60-second freshness objective, and missing data counts because dead aggregators make no GetRecords calls and the metric stops. The stream metric covers all shards together, so one worker stuck in a batch hides behind the other 15; the counts lag is the age of the newest click committed for a shard, published by the worker that holds it, so a stuck shard shows as a growing or missing value. Stats go stale, but nothing is lost within 7 days.',
     },
     {
       name: 'Clicks being dropped',
@@ -1007,9 +1038,9 @@ export const urlShortener: Design = {
     {
       name: 'Takedown not holding',
       metric:
-        'Custom: takedown follow-ups that exhausted retries, or a failed takedown verification, above 0',
+        'SQS ApproximateNumberOfMessagesVisible on the follow-up dead-letter queue above 0, or ApproximateAgeOfOldestMessage on the follow-up queue above 45 s',
       meaning:
-        'A deleted link may keep redirecting for up to the 6-hour TTL; fix the cache entry by hand.',
+        'A follow-up used its three tries without a 410, about 40 s after the delete, or the worker is not taking follow-ups at all. Both come from the queue, so a dead worker cannot silence them. SQS reports to CloudWatch once a minute, and a queue that was idle for hours can take up to 15 minutes to report again, so the alarm fires minutes after the failure, not inside the 1-minute objective: it pages on each takedown that fails, without waiting for failures to add up to 1% of takedowns. A deleted link may keep redirecting for up to the 6-hour TTL; fix the cache entry by hand.',
     },
   ],
   evolution: {
