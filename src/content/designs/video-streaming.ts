@@ -88,8 +88,8 @@ export const videoStreaming: Design = {
       { id: 'raw', title: 'Raw storage', detail: 'Original files', column: 1, row: 'top' },
       {
         id: 'queue',
-        title: 'Job queue',
-        detail: 'Jobs and tasks',
+        title: 'Queues',
+        detail: 'Start and tasks',
         column: 2,
         row: 'top',
         appearsAt: 2,
@@ -169,7 +169,7 @@ export const videoStreaming: Design = {
       {
         title: 'Start an upload',
         narration:
-          'The creator’s app asks the video API for an upload. The API creates a video record with status "uploading", starts a multipart upload in object storage and returns a signed URL for each part.',
+          'The creator’s app asks the video API for an upload. Its creator service, which runs apart from the play service that viewers call and is the only one allowed to sign upload URLs, creates a video record with status "uploading", starts a multipart upload in object storage and returns a signed URL for each part.',
         tradeoff:
           'Signed URLs let the file bypass our servers entirely, so API servers never hold gigabytes in memory or tie up connections for minutes. The cost is that the API must trust storage events to know what arrived, and the URLs must expire quickly.',
         nodes: ['creator', 'api', 'meta', 'raw'],
@@ -197,9 +197,9 @@ export const videoStreaming: Design = {
       {
         title: 'Complete and queue processing',
         narration:
-          'When every part is in, the app calls complete with the list of parts and their checksums. The API records the status "processing" and the complete time, then asks storage to assemble the original file, which storage only does on that explicit request. Storage emits an event once the file exists, and the event queues a processing job.',
+          'When every part is in, the app calls complete with the list of parts and their checksums. The creator service records the status "processing" and the complete time, then asks storage to assemble the original file, which storage only does on that explicit request. Storage emits an event once the file exists, and the event queues a processing job.',
         tradeoff:
-          'Queues between upload and transcoding absorb bursts of uploads and survive worker crashes: the job waits in one queue until a workflow starts, and its tasks wait in another until a transcoder is free. They add a little delay before work starts, which is small next to the minutes transcoding takes.',
+          'Queues between upload and transcoding absorb bursts of uploads and survive worker crashes: the job waits in the start queue until a workflow starts, and its tasks wait in the task queue until a transcoder is free. They add a little delay before work starts, which is small next to the minutes transcoding takes.',
         nodes: ['creator', 'api', 'meta', 'raw', 'queue'],
         travel: [
           ['creator', 'api'],
@@ -214,7 +214,7 @@ export const videoStreaming: Design = {
       {
         title: 'Split and transcode in parallel',
         narration:
-          'The job first writes a plan: the video as 4-second ranges of frames, grouped into tasks of about a minute. Transcoders pull tasks from a queue. Each task names the original and a range; the transcoder seeks to the source keyframe before the range, decodes, and encodes the range into the four rungs of the base ladder, 240p to 720p, with a keyframe forced at every 4-second boundary so all rungs switch at the same points. Audio is encoded once per video in its own task, and 1080p is added only once a video passes a view threshold. Transcoders run on Spot instances, which are cheap but can be reclaimed, and in an isolated network, because an uploaded file can be crafted to attack a decoder.',
+          'The job first writes a plan: the video as 4-second ranges of frames, grouped into tasks of about a minute. Transcoders pull tasks from the task queue. Each task names the original and a range; the transcoder seeks to the source keyframe before the range, decodes, and encodes the range into the four rungs of the base ladder, 240p to 720p, with a keyframe forced at every 4-second boundary so all rungs switch at the same points. Audio is encoded once per video, in its own task or in a few for a long video, and 1080p is added only once a video passes a view threshold. Transcoders run on Spot instances, which are cheap but can be reclaimed, and in an isolated network, because an uploaded file can be crafted to attack a decoder.',
         tradeoff:
           'Transcoding a long video on one machine can take longer than the video itself. Tasks spread the work across hundreds of machines so even long videos are ready in minutes, at the cost of an orchestrator that tracks every task and retries failures. Tasks of about a minute are also what make Spot safe: a task encodes in about half a minute, so a reclaimed instance usually finishes it inside the notice and at worst loses one task per worker, not an hour.',
         nodes: ['queue', 'transcode'],
@@ -227,7 +227,7 @@ export const videoStreaming: Design = {
       {
         title: 'Package segments and manifests',
         narration:
-          'The output of every task is CMAF segments of 4 seconds, which HLS and DASH players both read, kept under a path that belongs to this attempt and contains a random token. When every task is done, the packager checks that every segment is there and writes the manifests that list every rendition.',
+          'The output of every task is CMAF segments of 4 seconds, which HLS and DASH players both read. Each transcoder writes them to segment storage itself, under a path that belongs to this attempt and contains a random token; the diagram folds that write into the packager’s arrow. When every task is done, the packager checks that every segment is there and writes the manifests that list every rendition.',
         tradeoff:
           'Small segments let the player switch quality often and start fast, but mean many more files and requests. A few seconds per segment is the usual balance. Storing the base ladder adds about 60% of the size of the original, because each rung is encoded at a much lower bitrate than the source.',
         nodes: ['transcode', 'packager', 'segments'],
@@ -254,7 +254,7 @@ export const videoStreaming: Design = {
       {
         title: 'Sweep for stuck videos',
         narration:
-          'Every five minutes a sweeper queries the metadata database for videos in "processing" that are not moving: no workflow started two minutes after complete, or no stage finished for fifteen minutes. The first has its job put back on the job queue, unless that queue is backed up behind a starter that is down; after three tries with no workflow the video is marked failed. The second waits until the stalled workflow has ended, which task timeouts force, and then starts the next attempt; after three attempts in all the video is marked failed.',
+          'Every five minutes a sweeper queries the metadata database for videos in "processing" that are not moving: no workflow started two minutes after complete, or no stage finished for fifteen minutes. The first has its job sent to the start queue again, a hop the diagram leaves out, unless that queue or its dead-letter queue shows a starter that is down or failing; after three tries with no workflow the video is marked failed. The second waits until the stalled workflow has ended, which task timeouts force, and until the task queue is no longer backed up, and then starts the next attempt; after three attempts in all the video is marked failed.',
         tradeoff:
           'Storage events arrive at least once but can be late, and we assume one can be lost on the way to the queue; the API can also crash between recording "processing" and asking storage to assemble the file. Without a sweeper such a video waits forever. The sweeper adds a small job and a query every few minutes, and a second run is harmless because each attempt writes under its own path and only one publish can win.',
         nodes: ['sweeper', 'meta'],
@@ -266,7 +266,7 @@ export const videoStreaming: Design = {
       {
         title: 'A viewer presses play',
         narration:
-          'The player asks the video API for the video’s metadata and receives its title, status and manifest URL.',
+          'The player asks the video API’s play service for the video’s metadata and receives its title, status and manifest URL.',
         tradeoff:
           'Metadata is small and read far more than it is written, so it is cached heavily and served from read replicas. Keeping metadata separate from the media means a database hiccup never touches the bytes already flowing from the CDN.',
         nodes: ['viewer', 'api', 'meta'],
@@ -329,11 +329,11 @@ export const videoStreaming: Design = {
       title: 'Upload a video',
       kind: 'sync',
       summary:
-        'Carla uploads a 2 GB video from her laptop. The API only hands out signed URLs; the bytes go in parts straight to S3, and complete is one call at the end.',
+        'Carla uploads a 2 GB video from her laptop. The creator service of the video API only hands out signed URLs; the bytes go in parts straight to S3, and complete is one call at the end.',
       runsOn: 'API on ECS → Aurora → S3 multipart upload with presigned URLs',
       participants: [
         { id: 'app', label: 'Carla’s app', service: 'Client' },
-        { id: 'api', label: 'Video API', service: 'ECS Fargate + Cognito' },
+        { id: 'api', label: 'Creator service', service: 'ECS Fargate + Cognito' },
         { id: 'db', label: 'Metadata', service: 'Aurora PostgreSQL' },
         { id: 's3', label: 'Raw storage', service: 'S3' },
       ],
@@ -392,7 +392,7 @@ export const videoStreaming: Design = {
         'S3 event → EventBridge → SQS → Lambda → Step Functions → SQS task queue → ECS on EC2 Spot → S3 → Aurora',
       participants: [
         { id: 's3raw', label: 'Raw storage', service: 'S3 + EventBridge' },
-        { id: 'sqs', label: 'Job queue', service: 'SQS' },
+        { id: 'sqs', label: 'Start queue', service: 'SQS' },
         { id: 'sfn', label: 'Orchestrator', service: 'Step Functions' },
         { id: 'enc', label: 'Transcoders', service: 'ECS on EC2 Spot' },
         { id: 'seg', label: 'Segment storage', service: 'S3' },
@@ -403,14 +403,14 @@ export const videoStreaming: Design = {
           from: 's3raw',
           to: 'sqs',
           label: 'Object Created raw/v91',
-          note: 'Delivered at least once, usually within seconds. A message the starter cannot handle ends in a dead-letter queue.',
+          note: 'Delivered at least once, usually within seconds. A message the starter fails on comes back after the visibility timeout of 2 minutes and goes to a dead-letter queue after five receives.',
           style: 'async',
         },
         {
           from: 'sqs',
           to: 'sfn',
           label: 'StartExecution name=v91-enc3-1',
-          note: 'A small Lambda reads the queue, starts a Standard workflow and records the start on the video. The name is the video id, the encoding version and the attempt. A duplicate message gets the running execution back, or an error once it has closed, so it never starts a second workflow.',
+          note: 'A small Lambda reads the queue, starts a Standard workflow and records the start on the video. The name is the video id, the encoding version and the attempt. A duplicate message gets the running execution back, or ExecutionAlreadyExists once it has closed; the starter treats both as success and deletes the message, so a duplicate never starts a second workflow and never reaches the dead-letter queue.',
         },
         {
           from: 'sfn',
@@ -443,11 +443,11 @@ export const videoStreaming: Design = {
       title: 'Press play',
       kind: 'sync',
       summary:
-        'Bruno opens the video. One small API call returns the manifest URL; every byte after that comes from the nearest CloudFront edge, and the player picks a rung for each next segment.',
+        'Bruno opens the video. One small call to the play service of the video API returns the manifest URL; every byte after that comes from the nearest CloudFront edge, and the player picks a rung for each next segment.',
       runsOn: 'API on ECS → ElastiCache / Aurora replica, then CloudFront edges',
       participants: [
         { id: 'player', label: 'Bruno’s player', service: 'Client' },
-        { id: 'api', label: 'Video API', service: 'ECS Fargate' },
+        { id: 'api', label: 'Play service', service: 'ECS Fargate' },
         { id: 'cache', label: 'Metadata cache', service: 'ElastiCache' },
         { id: 'edge', label: 'Edge', service: 'CloudFront' },
       ],
@@ -551,33 +551,33 @@ export const videoStreaming: Design = {
         { id: 'sweeper', label: 'Sweeper', service: 'Lambda' },
         { id: 'db', label: 'Metadata', service: 'Aurora PostgreSQL' },
         { id: 's3', label: 'Raw storage', service: 'S3' },
-        { id: 'sqs', label: 'Job queue', service: 'SQS' },
+        { id: 'sqs', label: 'Start queue', service: 'SQS' },
       ],
       steps: [
         {
           from: 'sched',
           to: 'sweeper',
           label: 'every 5 min',
-          note: 'A few hundred rows at most, well within a Lambda run.',
+          note: 'A few hundred rows in a normal run, well within a Lambda run. After an outage there are many more, and the sweeper takes them oldest first, a batch per run.',
           style: 'async',
         },
         {
           from: 'sweeper',
           to: 'db',
           label: 'processing: no workflow after 2 min, or no stage for 15 min',
-          note: 'The age of the oldest such video is published as a metric and alarmed. An upload still in uploading after 7 days is marked failed, when the lifecycle rule deletes its parts. The same query finds a 1080p upgrade that started more than 15 minutes ago and has not finished; once its last execution has ended, the sweeper starts it again, up to three times.',
+          note: 'The age of the oldest such video is published as a metric on every run and alarmed; the alarm treats missing data as breaching, so a sweeper that stops also fires it. An upload still in uploading after 7 days is marked failed, when the lifecycle rule deletes its parts. The same query finds a 1080p upgrade that started more than 15 minutes ago and has not finished; once its last execution has ended and the task queue is not backed up, the sweeper starts it again, up to three times.',
         },
         {
           from: 'sweeper',
           to: 's3',
           label: 'HeadObject raw/v91',
-          note: 'For a video with no workflow. If the original exists, the event was lost and the job is queued as attempt 1, the name a late event would use. If it is missing, the API crashed before storage assembled the file, and the sweeper repeats the complete with the saved part list, checking for the original first if S3 answers NoSuchUpload. While the oldest message in the job queue is older than two minutes the starter is down, so the sweeper queues nothing and counts nothing; otherwise each try is counted on the video, and after three tries with no workflow the video is marked failed.',
+          note: 'For a video with no workflow. If the original exists, the event was lost and the job is queued as attempt 1, the name a late event would use. If it is missing, the API crashed before storage assembled the file, and the sweeper repeats the complete with the saved part list, checking for the original first if S3 answers NoSuchUpload; on a refused part list the sweeper does what the API does: status back to uploading, saved list and complete time dropped. While the oldest message in the start queue is older than two minutes, or its dead-letter queue holds any message, the starter is down or failing, so the sweeper queues nothing and counts nothing; otherwise each try is counted on the video, and after three tries with no workflow the video is marked failed. Once the starter is fixed, the on-call redrives the dead-letter queue into the start queue, which starts the videos that waited and lifts the hold; a message that can never start is deleted and its video marked failed, so the sweeper does not feed it back. The execution name makes a redriven duplicate harmless.',
         },
         {
           from: 'sweeper',
           to: 'sqs',
           label: 'enqueue v91, attempt 2',
-          note: 'For a stalled video, and only after its last execution has ended. The attempt number is raised with a conditional write, so two sweeper runs cannot start two attempts. If the sweeper crashes between that write and the enqueue, the next run finds an attempt with no execution and queues that same attempt again; the execution name makes the repeat harmless. After three attempts in all the video is marked failed. The path of an attempt that did not publish is deleted only once the video is ready on another path, or failed.',
+          note: 'For a stalled video, and only after its last execution has ended. While the oldest task in the task queue is older than 3 minutes, the threshold of the backlog alarm, the sweeper starts no attempt: it would only time out in the same queue, so a capacity shortage costs a video one attempt, not all three. When the queue recovers it starts the waiting videos oldest first, a batch per run. The attempt number is raised with a conditional write, so two sweeper runs cannot start two attempts. If the sweeper crashes between that write and the enqueue, the next run finds an attempt with no execution and queues that same attempt again; the execution name makes the repeat harmless. After three attempts in all the video is marked failed. The path of an attempt that did not publish is deleted only once the video is ready on another path, or failed.',
         },
       ],
     },
@@ -607,7 +607,7 @@ export const videoStreaming: Design = {
           from: 'queue',
           to: 'enc',
           label: 'task 17 visible again at once',
-          note: 'The message was never deleted, so the queue hands it to a worker on another instance. A worker that dies with no notice cannot hand anything back; its task reappears when the visibility timeout of 2 minutes ends. A worker extends that timeout while it is still encoding, so a long audio task is not handed out twice. Nothing partial is visible: an S3 PUT stores the whole object or nothing.',
+          note: 'The message was never deleted, so the queue hands it to a worker on another instance. A worker that dies with no notice cannot hand anything back; its task reappears when the visibility timeout of 2 minutes ends. A worker extends that timeout while it is still encoding, so a slow task is not handed out twice. A task counts toward the age of the oldest message until it is deleted, so the plan sizes every task, audio included, to finish well inside the 3 minutes of the backlog threshold. Nothing partial is visible: an S3 PUT stores the whole object or nothing.',
           style: 'async',
         },
         {
@@ -676,7 +676,7 @@ export const videoStreaming: Design = {
         },
       ],
       choice:
-        'A small base ladder for every upload (240p, 360p, 480p and 720p), and 1080p and more efficient encodings only once a video passes a view threshold. Plays are counted from player beacons in hourly batches. Past the threshold a second workflow writes the new rungs under a new encoding version with its own manifest, and one conditional write swaps the manifest path; players already running keep the old manifest. The new manifest lists the base rungs where they already are and the new rung under the new path, so nothing is encoded twice or copied, and a path is deleted only when no published manifest points into it. The upgrade is recorded on the video with its start time; the sweeper starts again one that has not finished after fifteen minutes, once its last execution has ended and up to three times; then the upgrade is dropped. A failed upgrade never changes the status, so the video stays ready on its base ladder. The originals are kept, so any rendition can be produced later.',
+        'A small base ladder for every upload (240p, 360p, 480p and 720p), and 1080p and more efficient encodings only once a video passes a view threshold. Plays are counted from player beacons in hourly batches. Past the threshold a second workflow writes the new rungs under a new encoding version with its own manifest, and one conditional write swaps the manifest path; players already running keep the old manifest. The new manifest lists the base rungs where they already are and the new rung under the new path, so nothing is encoded twice or copied, and a path is deleted only when no published manifest points into it. The upgrade is recorded on the video with its start time; the sweeper starts again one that has not finished after fifteen minutes, once its last execution has ended and the task queue is not backed up, and up to three times; then the upgrade is dropped. A failed upgrade never changes the status, so the video stays ready on its base ladder. The originals are kept, so any rendition can be produced later.',
     },
     {
       question: 'How do we protect the system from what people upload?',
@@ -698,7 +698,7 @@ export const videoStreaming: Design = {
         },
       ],
       choice:
-        'Isolate. The decoder runs in a sandbox with no network. The worker around it fetches the input and stores the output with short-lived credentials scoped to that video’s original and that attempt’s output path. Workers sit in private subnets with no internet access, with a size and duration check first and a timeout per task. Upload URLs are signed per part, expire within an hour, and are issued only to signed-in creators under a per-creator limit. The buckets are private: only CloudFront reads segments, under a path with a random token that the API reveals once the video is ready.',
+        'Isolate. The decoder runs in a sandbox with no network. The worker around it fetches the input and stores the output with short-lived credentials scoped to that video’s original and that attempt’s output path. Workers sit in private subnets with no internet access, with a size and duration check first and a timeout per task. Upload URLs are signed per part, expire within an hour, and are issued only by the creator service, to signed-in creators under a per-creator limit; the role of the play service cannot sign them. The buckets are private: only CloudFront reads segments, under a path with a random token that the API reveals once the video is ready.',
     },
     {
       question: 'Which streaming format, and how many copies of each segment?',
@@ -757,7 +757,7 @@ export const videoStreaming: Design = {
       {
         property: 'Processing',
         promise:
-          'Every completed upload is processed at least once, made harmless by two rules: each attempt writes under its own path (video id, encoding version, random token) with writes that never replace an existing object, and only one attempt can publish. A sweeper re-queues any video in "processing" that has no workflow or whose workflow died; after three tries with no workflow, or three attempts in all, the video is marked failed.',
+          'Every completed upload is processed at least once, made harmless by two rules: each attempt writes under its own path (video id, encoding version, random token) with writes that never replace an existing object, and only one attempt can publish. A sweeper re-queues any video in "processing" that has no workflow or whose workflow died; after three tries with no workflow, or three attempts in all, the video is marked failed. It holds both while the queue in front is backed up, the start queue behind a failing starter (until its dead-letter queue has been redriven) or the task queue in a capacity shortage, so a single outage delays videos and cannot use up their three attempts.',
       },
       {
         property: 'Publish consistency',
@@ -778,7 +778,7 @@ export const videoStreaming: Design = {
       'Players retry failed segment requests and can drop to a lower rendition.',
     ],
     doesNotGuarantee: [
-      'A hard bound on time to ready. Minutes is the typical case; a burst of uploads turns into queue time, and a backlog longer than the 30-minute task timeout turns into failed workflows and new attempts.',
+      'A hard bound on time to ready. Minutes is the typical case; a burst of uploads turns into queue time, and a backlog longer than the 30-minute task timeout turns into timed-out workflows, which the sweeper starts again only once the oldest task is back under 3 minutes. Such a video is late by the shortage plus a second encode, and the shortage uses one of its three attempts.',
       'Exactly-once processing. Tasks and notifications can repeat; conditional writes make the repeat harmless.',
       'The full quality ladder from the first view. 1080p is added only after a video passes the view threshold.',
       'Fresh metadata on every read. A cached entry lives 30 s while a video is processing and a few minutes once it is ready, and publish deletes it; a fill that races the delete is bounded by the same 30 s. So a video can show as processing briefly after it is ready, and an edit to a title takes minutes to appear.',
@@ -802,9 +802,9 @@ export const videoStreaming: Design = {
       impact:
         'The video shows "processing" but no workflow exists. It would sit there forever while the creator waits.',
       detection:
-        'The sweeper finds videos in "processing" with no workflow started two minutes after complete. The age of the oldest such video is an alarmed metric.',
+        'The sweeper finds videos in "processing" with no workflow started two minutes after complete. The age of the oldest such video is an alarmed metric, and a sweeper that stops running has an alarm of its own.',
       recovery:
-        'If the original exists, the sweeper queues the job under the name a late event would use, so the two cannot start two workflows. If it does not, the sweeper repeats the complete with the saved part list. Tries are not counted while the job queue is backed up behind a starter that is down; after three tries with no workflow the video is marked "failed". Otherwise the video continues to "ready" two to seven minutes late: the two-minute rule plus up to one sweep interval.',
+        'If the original exists, the sweeper queues the job under the name a late event would use, so the two cannot start two workflows. If it does not, the sweeper repeats the complete with the saved part list. Tries are not counted while the start queue is backed up behind a starter that is down, or while its dead-letter queue still holds messages waiting for a redrive; after three tries with no workflow the video is marked "failed". Otherwise the video continues to "ready" two to seven minutes late: the two-minute rule plus up to one sweep interval.',
     },
     {
       scenario:
@@ -913,10 +913,10 @@ export const videoStreaming: Design = {
       {
         part: 'Video API',
         service:
-          'Application Load Balancer and Amazon ECS on AWS Fargate; Amazon Cognito for creators; AWS WAF',
-        why: 'Small control requests only: create, resume, complete, metadata. The bytes never pass through it.',
+          'Two services on Amazon ECS with AWS Fargate, each behind its own Application Load Balancer: the creator service for the creator routes (create, resume, complete) and the play service for metadata reads; Amazon Cognito for creators; AWS WAF',
+        why: 'Small control requests only: create, resume, complete, metadata. The bytes never pass through it. The creator service, about 70 calls a second on average (three per upload at 23 uploads a second: create, complete and on average one resume or status call), is kept apart from the 200K plays a second, so a flood of plays cannot starve uploads, each side has its own error counts, and only the role of the creator service can sign upload URLs.',
         watch:
-          'TargetResponseTime and HTTPCode_Target_5XX_Count; WAF BlockedRequests on upload creation.',
+          'TargetResponseTime; WAF BlockedRequests on upload creation. Per load balancer, HTTPCode_Target_5XX_Count plus HTTPCode_ELB_5XX_Count over RequestCount, because the target count leaves out the errors the load balancer generates when no target answers. RequestCount is not reported while no target is registered, so the two alarms on this ratio count missing data as breaching.',
       },
       {
         part: 'Raw storage and uploads',
@@ -931,7 +931,7 @@ export const videoStreaming: Design = {
           'S3 Event Notifications to Amazon EventBridge, then an Amazon SQS start queue; a second SQS queue for transcode tasks; a dead-letter queue behind each',
         why: 'The start queue outlives a failing starter, and the task queue is the buffer between bursts of uploads and the transcoders. Events are at least once, which the workflow names make harmless.',
         watch:
-          'ApproximateAgeOfOldestMessage on the task queue, the first sign of a transcoding shortfall. On the start queue the same metric shows a starter that stopped. Both have alarms.',
+          'ApproximateAgeOfOldestMessage on the task queue, the first sign of a transcoding shortfall. On the start queue the same metric shows a starter that stopped. Both have alarms. ApproximateNumberOfMessagesVisible on each dead-letter queue; the one behind the start queue is part of the starter alarm and of the sweeper’s hold.',
       },
       {
         part: 'Orchestrator',
@@ -982,7 +982,7 @@ export const videoStreaming: Design = {
           'Amazon EventBridge Scheduler and AWS Lambda; Amazon SNS for creator notifications',
         why: 'The backstop for lost events, a complete that crashed halfway and dead workflows; it also deletes the paths of attempts that did not publish, once the video is ready on another path or failed. SNS carries the "your video is ready" message, deduplicated by video id.',
         watch:
-          'Custom metrics: age of the oldest stuck video, time from complete to ready, and videos marked failed against videos completed.',
+          'Custom metrics, published on every run: age of the oldest stuck video, time from complete to ready, and videos marked failed against videos completed. Their alarms treat missing data as breaching, because a sweeper that dies publishes nothing. Lambda Invocations and Errors for the sweeper itself, with an alarm on no successful run in 15 minutes.',
       },
       {
         part: 'Player telemetry',
@@ -1002,9 +1002,10 @@ export const videoStreaming: Design = {
     ],
     limits: [
       'An S3 multipart upload has at most 10,000 parts, each at least 5 MiB except the last, so part size grows with file size; parts of 16 MB cover files up to 160 GB, and the 2 GB example is 125 parts.',
-      'A presigned URL lasts at most 7 days when signed with long-term credentials, and dies with the credentials when signed with temporary ones. The API signs with its task role, whose credentials rotate every 1 to 6 hours, so upload URLs are valid for an hour at most and the app asks for fresh ones when one is refused.',
+      'A presigned URL lasts at most 7 days when signed with long-term credentials, and dies with the credentials when signed with temporary ones. The creator service signs with its task role, whose credentials rotate every 1 to 6 hours, so upload URLs are valid for an hour at most and the app asks for fresh ones when one is refused.',
       'S3 serves at least 3,500 writes and 11,000 reads a second per partitioned prefix and adds partitions as traffic grows, answering 503 Slow Down in the meantime. A slash in a key means nothing to it; keys here start with the video id, so requests spread over many prefixes. 500M new objects a day is about 5,800 writes a second.',
-      'A Spot instance gets a two-minute notice before it is reclaimed, which is why a task is one minute of video and encodes in about 30 s. The visibility timeout on the task queue is 2 minutes, below the 3-minute backlog alarm; a worker extends it while it encodes and, with a notice, hands its task back at once. The queue keeps a message for 30 minutes, the same as the task timeout.',
+      'A Spot instance gets a two-minute notice before it is reclaimed, which is why a task is one minute of video and encodes in about 30 s. The visibility timeout on the task queue is 2 minutes, below the 3-minute backlog alarm; a worker extends it while it encodes and, with a notice, hands its task back at once. A task counts toward ApproximateAgeOfOldestMessage until it is deleted, so every task is sized to finish well inside those 3 minutes, and the audio of a long video is cut into several tasks. The queue keeps a message for 30 minutes, the same as the task timeout.',
+      'ApproximateAgeOfOldestMessage leaves out a message once it has been received three times without being deleted. The start queue has a visibility timeout of 2 minutes and a dead-letter queue after five receives, so behind a starter that receives and fails, the oldest message still counted is about 4 minutes old, past the 2-minute threshold of the sweeper’s hold and of the alarm. If new messages stop as well, every message leaves the metric after its third receive, so the hold and the alarm also look at the dead-letter queue, where those messages land about 10 minutes in. Between the two, sweeper runs 5 minutes apart can count two tries on a video, never the third.',
       'Starting a Standard workflow again with the same name and input returns the running execution, and fails with ExecutionAlreadyExists once it has closed; the name can be reused only 90 days later. That makes the name an idempotency key for starting a workflow.',
       'An inline Map state runs at most 40 iterations at once, so a two-hour video (120 tasks) runs 40 tasks at a time. A Distributed Map runs 10,000, but only 1,000 Map Runs can be open per account, fewer than the videos in flight here.',
       'By default Step Functions accepts about 300 new Standard executions a second in the three largest regions and 150 elsewhere; the peak of 70 uploads a second fits. The tighter quotas are per task: SendTaskSuccess refills at 500 a second in the largest regions and 300 elsewhere, against 300 tasks a second at peak, and state transitions at 5,000 and 800 a second, against a few per task. All three can be raised.',
@@ -1015,7 +1016,8 @@ export const videoStreaming: Design = {
     {
       objective: 'Start time',
       target: '95% of plays show the first frame within 2 s',
-      measure: 'Player beacons, per region and CDN.',
+      measure:
+        'Player beacons, per region and CDN. A play whose beacon reports no first frame within 2 s counts as a miss, and so does a play answered 5xx at the play load balancer, which sends no beacon.',
     },
     {
       objective: 'Smooth playback',
@@ -1025,13 +1027,14 @@ export const videoStreaming: Design = {
     {
       objective: 'Time to ready',
       target: '95% of videos under 10 minutes long are ready within 10 minutes of complete',
-      measure: 'Ready time minus complete time from the metadata database, published as a metric.',
+      measure:
+        'Ready time minus complete time from the metadata database, published as a metric by the sweeper on every run.',
     },
     {
       objective: 'Uploads',
-      target: '99.5% of complete calls succeed',
+      target: '99.5% of upload calls (create, resume and complete) succeed',
       measure:
-        'Answers to complete at the API, leaving out client errors such as a wrong part list.',
+        'At the creator load balancer, the failed share is (HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / RequestCount, so the errors the load balancer generates when no target answers are counted. RequestCount is not reported while no target is registered, and a minute without it counts as failed. Client errors such as a wrong part list are answered as 4xx and left out.',
     },
     {
       objective: 'Processing',
@@ -1045,38 +1048,56 @@ export const videoStreaming: Design = {
       name: 'Processing falling behind',
       metric: 'SQS ApproximateAgeOfOldestMessage on the task queue above 3 min for 5 min',
       meaning:
-        'The first bottleneck: not enough transcoding capacity, often a Spot shortage; add instance types or on-demand capacity. It fires while the 10-minute target can still be met.',
+        'The first bottleneck: not enough transcoding capacity, often a Spot shortage; add instance types or on-demand capacity. It fires while the 10-minute target can still be met. Past 30 minutes of backlog workflows time out, and the sweeper starts no new attempt until this age is back under 3 min.',
     },
     {
       name: 'Slow time to ready',
       metric:
-        'Custom: P95 of ready time minus complete time, for videos under 10 minutes long, above 7 min for 15 min',
+        'Custom: P95 of ready time minus complete time, for videos under 10 minutes long, above 7 min for 15 min; missing data counts as breaching',
       meaning:
         'The time-to-ready SLO is at risk without a task backlog: slow plan or package steps, or a throttled workflow.',
     },
     {
       name: 'Stuck videos',
       metric:
-        'Custom: oldest video in processing with no workflow or no stage progress, above 30 min',
-      meaning: 'Events lost or workflows dying faster than the sweeper fixes them.',
+        'Custom: oldest video in processing with no workflow or no stage progress, above 30 min; missing data counts as breaching',
+      meaning:
+        'Events lost or workflows dying faster than the sweeper fixes them, or a sweeper holding its restarts behind a backed-up queue.',
+    },
+    {
+      name: 'Sweeper stopped',
+      metric:
+        'Lambda Invocations minus Errors for the sweeper, summed over 15 min, below 1; missing data counts as breaching',
+      meaning:
+        'No sweeper run has succeeded in three intervals, so nothing re-queues stuck videos and the three custom pipeline metrics have stopped. Both counts come from Lambda, not from the sweeper’s code, and a schedule that stops invoking it shows as missing data.',
     },
     {
       name: 'Starter stopped',
-      metric: 'SQS ApproximateAgeOfOldestMessage on the start queue above 2 min for 5 min',
+      metric:
+        'SQS ApproximateAgeOfOldestMessage on the start queue above 2 min for 5 min, or ApproximateNumberOfMessagesVisible on its dead-letter queue above 0',
       meaning:
-        'The Lambda that starts workflows is failing or throttled, so nothing new is processed; the sweeper holds its re-queues and counts no tries until the queue drains. No other metric moves, because no video becomes ready.',
+        'The Lambda that starts workflows is failing or throttled, so nothing new is processed; the sweeper holds its re-queues and counts no tries until the queue drains and its dead-letter queue is empty. This alarm fires first, about 7 minutes in: no video becomes ready, so the time-to-ready alarm fires only once its 15 minutes pass with no data, and the stuck-video age needs 30 min. It returns to OK once the starter is fixed and the on-call has redriven the dead-letter queue into the start queue, or deleted a message that can never start and marked its video failed.',
     },
     {
       name: 'Failed videos',
-      metric: 'Custom: videos marked failed above 0.5% of videos completed, over 15 min',
+      metric:
+        'Custom: videos with a complete time marked failed above 0.5% of videos completed, over 15 min; missing data counts as breaching',
       meaning:
-        'Half the error budget of the processing SLO. Usually a bad encoder release or a new input format; roll back the encoder version. ExecutionsFailed and ExecutionsTimedOut show which attempts died.',
+        'Half the error budget of the processing SLO; abandoned uploads have no complete time and are left out, as in the SLO. Usually a bad encoder release or a new input format; roll back the encoder version. ExecutionsFailed and ExecutionsTimedOut show which attempts died.',
     },
     {
       name: 'Uploads failing',
-      metric: 'Custom: complete calls answered with a server error above 0.3% for 10 min',
+      metric:
+        '(HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / RequestCount on the creator load balancer above 0.3% for 10 min; an error count with no data point is read as zero, and a missing ratio counts as breaching',
       meaning:
-        'Storage or the metadata primary is refusing writes, so uploads that finished cannot be completed.',
+        'Storage or the metadata primary is refusing writes, or the tasks of the creator service are down, so uploads cannot start or be completed. While targets are registered but do not answer, the load balancer’s own 502 and 504 responses are counted. With no target registered it answers 503 and stops reporting RequestCount, so the ratio has no data, which is why missing data breaches.',
+    },
+    {
+      name: 'Plays failing',
+      metric:
+        'The same ratio on the play load balancer above 1% for 5 min; an error count with no data point is read as zero, and a missing ratio counts as breaching',
+      meaning:
+        'The play service, or the cache and replicas behind it, is failing, so players get no manifest URL and new plays do not start; videos already playing continue. A play that never starts is a miss of the start-time SLO, whose budget is 5%, and its player may send no beacon, so this alarm does not depend on player data.',
     },
     {
       name: 'Edge hit rate',
@@ -1085,13 +1106,15 @@ export const videoStreaming: Design = {
     },
     {
       name: 'Slow starts',
-      metric: 'Start time P95 from player beacons above 1.7 s in any region for 10 min',
+      metric:
+        'Start time P95 from player beacons above 1.7 s in any region for 10 min; missing data counts as breaching',
       meaning:
         'The start-time SLO is close to its 2 s limit: a slow metadata read, or cold edges serving the manifest and first segments.',
     },
     {
       name: 'Viewers stalling',
-      metric: 'Rebuffer ratio above 0.4% in any region for 10 min',
+      metric:
+        'Rebuffer ratio from player beacons above 0.4% in any region for 10 min; missing data counts as breaching',
       meaning:
         'A CDN or network problem in that region; consider steering traffic or lowering the starting rung.',
     },
