@@ -541,7 +541,7 @@ export const paymentWebhooks: Design = {
           from: 'sched',
           to: 'job',
           label: 'RunTask at 03:00',
-          note: 'An ECS task, not a Lambda: the run takes about 20 minutes and Lambda stops at 15.',
+          note: 'An ECS task, not a Lambda: the run takes about 20 minutes and grows with volume, and Lambda stops at 30.',
           style: 'async',
         },
         {
@@ -928,7 +928,7 @@ export const paymentWebhooks: Design = {
       {
         part: 'Reconciliation',
         service: 'Amazon EventBridge Scheduler starting an Amazon ECS task every night',
-        why: 'A run of about 20 minutes is past Lambda’s 15-minute limit, and the task resumes from a saved cursor.',
+        why: 'A run of about 20 minutes grows with volume toward Lambda’s 30-minute limit, and the task resumes from a saved cursor.',
         watch:
           'Custom metrics: differences found, run duration, and the time of the last successful run.',
       },
@@ -952,7 +952,7 @@ export const paymentWebhooks: Design = {
       'SQS raises the receive count on every receive and the redrive policy cannot exclude any, so a retry that should not count toward the dead-letter limit has to happen without a new receive.',
       'SQS keeps a message for at most 14 days, far longer than the worst backlog, and the inbox remains the record anyway.',
       'A standard SQS queue delivers at least once and does not keep order, which the design already assumes.',
-      'Lambda stops at 15 minutes, so the 20-minute reconciliation runs as an ECS task.',
+      'Lambda stops a function after 30 minutes; the 20-minute reconciliation grows with volume, so it runs as an ECS task.',
       'An Aurora failover takes tens of seconds, during which the endpoint answers 5xx and the provider retries.',
       'AWS WAF attaches to an Application Load Balancer, not to a Network Load Balancer, which is one reason for the ALB.',
       'EventBridge Scheduler runs at most once a minute, enough for the incremental reconciliation every few minutes at 10x.',

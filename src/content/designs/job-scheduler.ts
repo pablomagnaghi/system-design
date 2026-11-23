@@ -1025,7 +1025,7 @@ export const jobScheduler: Design = {
       'SendMessageBatch takes at most 10 messages per call, so a claim of 500 runs is sent as 50 calls in parallel, and a queue keeps a message for at most 14 days, which bounds how long a dead letter can wait for a replay.',
       'SQS standard queues deliver at least once and do not keep order, which the conditional start and the run id already handle.',
       'An Aurora failover takes tens of seconds, during which nothing can be claimed; the design treats it as a late start, not a loss.',
-      'AWS Lambda stops a function after 15 minutes, so workers run on ECS; a job type that always finishes in seconds could use Lambda.',
+      'AWS Lambda stops a function after 30 minutes and long jobs can run for hours, so workers run on ECS; a job type that always finishes in seconds could use Lambda.',
     ],
   },
   slos: [
