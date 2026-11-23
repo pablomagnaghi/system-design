@@ -69,7 +69,7 @@ export const jobScheduler: Design = {
   highLevel: {
     label: 'Run a job through the scheduler',
     intro:
-      'Follow one job from the moment it is scheduled until it has run, including what happens when a worker dies or the job keeps failing. The design grows as it needs to: watch a midnight burst leave one dispatcher behind until partitions and leases join, then the queue, workers and history. Numbers are illustrative; P95 here is how late a job starts. Press play, or step through the stages.',
+      'Follow one job from the moment it is scheduled until it has run, including what happens when a worker dies or the job keeps failing. The design grows as it needs to: watch a midnight burst leave one dispatcher behind until partitions and leases join, then the queue, workers and history. Numbers are illustrative; P95 here is how late a job starts, and the error rate is the share of runs that fail, not of API calls. Press play, or step through the stages.',
     nodes: [
       { id: 'service', title: 'Services', detail: 'Schedule a job', column: 0, row: 'middle' },
       { id: 'api', title: 'Scheduler API', detail: 'Validate + store', column: 1, row: 'middle' },
@@ -146,7 +146,7 @@ export const jobScheduler: Design = {
           ['api', 'jobs'],
         ],
         short: 'Schedule',
-        metrics: { requestsPerSecond: '1.2K', p95Latency: '1 s', errorRate: '0%' },
+        metrics: { requestsPerSecond: '1.2K', errorRate: '0%' },
         load: { api: 15, jobs: 15 },
       },
       {
@@ -158,7 +158,7 @@ export const jobScheduler: Design = {
         nodes: ['jobs'],
         travel: [],
         short: 'Due index',
-        metrics: { requestsPerSecond: '1.2K', p95Latency: '1 s', errorRate: '0%' },
+        metrics: { requestsPerSecond: '1.2K', errorRate: '0%' },
         load: { jobs: 20 },
       },
       {
@@ -218,7 +218,7 @@ export const jobScheduler: Design = {
       {
         title: 'Hand off to a work queue',
         narration:
-          'Claimed jobs are put on a queue. Workers pull from it, and the worker pool scales on how many jobs are waiting. The claim and the enqueue are two separate steps, so a sweeper puts back on the queue any run that was claimed but not started by its deadline.',
+          'Claimed jobs are put on a queue. The workers of the next stage pull from it, and their pool scales on how many jobs are waiting. The claim and the enqueue are two separate steps, so a sweeper, a small background task that is not drawn, puts back on the queue any run that was claimed but not started by its deadline.',
         tradeoff:
           'The queue separates deciding when to run from actually running, so slow jobs never delay scheduling. It delivers at least once, which means the job code itself must tolerate running twice.',
         nodes: ['dispatcher', 'queue'],
@@ -288,7 +288,7 @@ export const jobScheduler: Design = {
       {
         title: 'Catch up after downtime',
         narration:
-          'If the scheduler was down, recurring jobs may have missed runs. Each job declares a catch-up policy: run once now, run every missed occurrence, or skip to the next. While the missed runs drain, starts are late and the lateness alarm stays on.',
+          'If the scheduler was down, recurring jobs may have missed runs. Each job declares a catch-up policy: run once now, run every missed occurrence, or skip to the next. An occurrence the policy skips is still recorded, as a run in the skipped state, so it is not mistaken for a lost one. While the missed runs drain, starts are late and the lateness alarm stays on.',
         tradeoff:
           'There is no single right answer: a billing job must run every missed period, while a cache refresh only needs the latest one. Making it a per-job setting avoids both duplicate work and silently skipped periods.',
         nodes: ['jobs', 'dispatcher'],
@@ -369,8 +369,8 @@ export const jobScheduler: Design = {
         {
           from: 'disp',
           to: 'db',
-          label: 'BEGIN; SELECT lease … FOR SHARE; check epoch',
-          note: 'The transaction first reads the lease row of partition 17 with a shared lock and checks that this dispatcher still holds it with its epoch. A takeover has to update that row, so it cannot commit in the middle of the claim, and a dispatcher that lost the lease cannot claim.',
+          label: 'BEGIN; SELECT leases … FOR SHARE; check epochs',
+          note: 'The transaction first reads the lease rows of the partitions this dispatcher holds, partition 17 among them, with a shared lock and checks that it still holds each one with its epoch, so one batch of 500 can span all of its partitions. A takeover has to update a lease row, so it cannot commit in the middle of the claim, and a dispatcher that lost a lease cannot claim from that partition. Claim transactions run with a statement timeout and an idle-in-transaction timeout shorter than the lease, so the database aborts the claim of a frozen dispatcher and its lock does not hold up the takeover.',
         },
         {
           from: 'disp',
@@ -418,8 +418,8 @@ export const jobScheduler: Design = {
           from: 'worker',
           to: 'db',
           label:
-            'UPDATE run SET status = running WHERE id = :run AND status = dispatched AND attempt = :n',
-          note: 'A conditional start: if another worker already started this attempt, or the attempt number in the message is stale, no row changes and this copy is dropped as a duplicate.',
+            'UPDATE run SET status = running, start_token = :t WHERE id = :run AND status = dispatched AND attempt = :n',
+          note: 'A conditional start: if another worker already started this attempt, or the attempt number in the message is stale, no row changes and this copy is dropped as a duplicate. The update also writes a start token that the worker generates for this delivery: if its reply was lost and the retried update changes no row, the worker reads the row, finds its own token on the same attempt, still running, and carries on, instead of dropping a run that it alone started.',
         },
         {
           from: 'worker',
@@ -431,7 +431,7 @@ export const jobScheduler: Design = {
           from: 'worker',
           to: 'db',
           label: 'heartbeat every 10 s',
-          note: 'While the job works, heartbeats keep the run alive. Three missed ones and the sweeper declares the run lost and retries it.',
+          note: 'While the job works, heartbeats keep the run alive. Three missed ones and the sweeper declares the run lost and retries it, or records it dead-lettered if that was the last allowed attempt.',
           style: 'async',
         },
         {
@@ -444,7 +444,7 @@ export const jobScheduler: Design = {
           from: 'worker',
           to: 'hist',
           label: 'append attempt',
-          note: 'Start, end, worker and result are copied to the history, kept 30 days. The run record in Aurora is the source of truth: if this append is lost, a daily replay copies finished runs to the history before their rows are dropped.',
+          note: 'Start, end, worker and result are copied to the history, kept 30 days. The run record in Aurora is the source of truth: if this append is lost, a daily replay copies finished runs, each with the attempt list on its row, to the history before their rows are dropped. An attempt whose worker died is appended by the sweeper that declares it lost.',
           style: 'async',
         },
       ],
@@ -469,26 +469,26 @@ export const jobScheduler: Design = {
           from: 'worker',
           to: 'db',
           label: 'attempt 1 failed: 503',
-          note: 'One conditional update records the failure with its error, raises the attempt number and returns the run to dispatched with a new deadline of now + backoff + 30 s.',
+          note: 'One conditional update adds the failed attempt with its error to the short attempt list kept on the run row, raises the attempt number and returns the run to dispatched with a new deadline of now + backoff + 30 s.',
         },
         {
           from: 'worker',
           to: 'sqs',
           label: 'requeue {runId, attempt 2}, delay 30 s ± jitter',
-          note: 'Exponential backoff with jitter, so a struggling target is not hammered by every job at once. If this send is lost, the sweeper finds the run past its deadline and enqueues it.',
+          note: 'Exponential backoff with jitter, so a struggling target is not hammered by every job at once. The delay is capped at 15 minutes, the longest an SQS message can be delayed. If this send is lost, the sweeper finds the run past its deadline and enqueues it.',
           style: 'async',
         },
         {
           from: 'worker',
           to: 'dlq',
           label: 'attempt 5 failed → dead letter',
-          note: 'After the maximum attempts the worker first records the run as dead-lettered, then sends it to the dead-letter queue. The record is the durable fact: the sweeper resends any dead-lettered run not yet marked as sent, so the run ends in a recorded state instead of disappearing.',
+          note: 'After the maximum attempts the worker first records the run as dead-lettered, then sends it to the dead-letter queue, emits the "runs dead-lettered" metric and marks the run as sent. The record is the durable fact: the sweeper repeats the send and the metric for any dead-lettered run not yet marked as sent, so the run ends in a recorded state instead of disappearing.',
         },
         {
           from: 'dlq',
           to: 'team',
           label: 'alarm: new dead letters',
-          note: 'The page is routed by the job type and owner on the "runs dead-lettered" metric that the worker emits. The team fixes the cause and replays the run; the same run id keeps the replay harmless.',
+          note: 'The page is routed by the job type and owner on the "runs dead-lettered" metric, emitted in the step that sends the dead letter and marks it as sent, which the sweeper repeats if the worker died before it. The team fixes the cause and replays the run; its run row is kept until then, and the same run id keeps the replay harmless.',
           style: 'async',
         },
       ],
@@ -523,13 +523,13 @@ export const jobScheduler: Design = {
           from: 'sweep',
           to: 'sqs',
           label: 'SendMessage {runId: 9031, attempt: 1}',
-          note: 'If the original message did get through, two now exist; the conditional start lets only one worker run it. The sweeper then moves the deadline forward, so a run waiting in a long queue is not sent again every few seconds.',
+          note: 'If the original message did get through, two now exist; the conditional start lets only one worker run it. The sweeper then moves the deadline forward and doubles its wait on each re-send of the same run, from 30 s up to 10 minutes, so a run waiting in a long queue gets a handful of extra messages instead of one every 30 s.',
         },
         {
           from: 'sweep',
           to: 'sweep',
-          label: 'count swept runs',
-          note: 'A steady rise means dispatchers are dying or the queue rejects writes, so it has an alarm.',
+          label: 'count first re-sends',
+          note: 'Only the first re-send of a run is counted. A steady rise means dispatchers are dying, the queue rejects writes, or runs are waiting in the queue for more than 30 s, so it has an alarm.',
         },
       ],
     },
@@ -597,7 +597,7 @@ export const jobScheduler: Design = {
           from: 'rec',
           to: 'db',
           label: 'occurrences due 09:00–10:00',
-          note: 'From each active job’s schedule and time zone it recomputes every occurrence that was due in the last full hour, partition by partition.',
+          note: 'From each active job’s schedule and time zone it recomputes every occurrence that was due since its last completed pass, normally the last full hour, partition by partition. A pass never looks further back than the run rows are kept, about a day, nor before a job was created; after a longer gap it checks the older occurrences against the history instead.',
         },
         {
           from: 'rec',
@@ -609,13 +609,13 @@ export const jobScheduler: Design = {
           from: 'rec',
           to: 'rec',
           label: '1 occurrence without a run',
-          note: 'A gap means a bug: a claim that advanced the next run without inserting the run, or a schedule computed wrongly.',
+          note: 'A gap is an occurrence with no run that the job row has already advanced past, read in the same snapshot as the runs. It means a bug: a claim that advanced the next run without inserting the run, or a schedule computed wrongly. An occurrence the job row still points at is only unclaimed, late and not lost: it is left to the dispatcher, and "Partition not claiming" covers it.',
         },
         {
           from: 'rec',
           to: 'db',
           label: 'insert missing run',
-          note: 'The missing run is created following the job’s catch-up policy, and the unique key makes a second pass harmless.',
+          note: 'The missing run is created following the job’s catch-up policy: in the skipped state if the policy skips it, otherwise as dispatched with a deadline already past, so the sweeper enqueues it on its next pass. The unique key makes a second pass harmless.',
         },
         {
           from: 'rec',
@@ -765,7 +765,7 @@ export const jobScheduler: Design = {
         },
       ],
       choice:
-        'Checkpoints. A long job saves its position, such as the last account processed, with each heartbeat, keyed by run id. A retry reads the checkpoint and resumes there, and the work after it stays idempotent by run id. Cancellation rides on the heartbeat: its reply carries a stop flag, and the job stops at its next checkpoint. Every job type also has a hard timeout, after which the attempt is declared lost.',
+        'Checkpoints. A long job saves its position, such as the last account processed, with each heartbeat, keyed by run id. A retry reads the checkpoint and resumes there, and the work after it stays idempotent by run id. Cancellation rides on the heartbeat: its reply carries a stop flag, and the job stops at its next checkpoint. Every job type also has a hard timeout, after which the sweeper declares the attempt lost, heartbeats or not.',
     },
     {
       question: 'How do we keep jobs and their payloads safe?',
@@ -802,17 +802,17 @@ export const jobScheduler: Design = {
       {
         property: 'One run per occurrence',
         promise:
-          'The scheduler creates a single run record for each (job id, scheduled time). The claim is a conditional update, the run table has a unique key on that pair, and the claim transaction checks the lease epoch of the partition, so two overlapping dispatchers cannot both fire the same occurrence.',
+          'The scheduler creates a single run record for each (job id, scheduled time). The claim is a conditional update, the run table has a unique key on that pair, and the claim transaction checks the lease epoch of every partition it claims from, so two overlapping dispatchers cannot both fire the same occurrence.',
       },
       {
         property: 'Execution',
         promise:
-          'Each run executes at least once, made harmless by the run id. A worker starts a run with a conditional update on (run id, attempt), so a duplicate message is dropped, and the job passes the run id to the systems it calls as an idempotency key for the case where an attempt is retried after it already had an effect. A failed or lost attempt returns the run to dispatched with a new deadline, so the same sweeper covers a retry whose message is lost.',
+          'Each run executes at least once, made harmless by the run id. A worker starts a run with a conditional update on (run id, attempt), so a duplicate message is dropped, and the job passes the run id to the systems it calls as an idempotency key for the case where an attempt is retried after it already had an effect. A failed or lost attempt returns the run to dispatched with a new deadline, so the same sweeper covers a retry whose message is lost. On the last allowed attempt the run is recorded dead-lettered instead, by the worker if the attempt failed and by the sweeper if it was lost.',
       },
       {
         property: 'Accounting',
         promise:
-          'Every run ends in a recorded state: succeeded, dead-lettered after the maximum attempts, or cancelled. A run still dispatched or running past its retry window raises the "Runs overdue or stuck" alarm, so no run disappears without a trace. The run record in the jobs database is the source of truth; the history is a copy of it, kept 30 days.',
+          'Every run ends in a recorded state: succeeded, dead-lettered after the maximum attempts, cancelled, or skipped by the catch-up policy. The retry window of a run is the longest it can take from its scheduled time to its last attempt: the maximum attempts times the hard timeout of the job type, plus the backoffs between them, plus 30 s of lost-worker detection and 30 s of dispatch deadline per attempt. A run still dispatched or running past its retry window raises the "Runs overdue or stuck" alarm, so no run disappears without a trace. The run record in the jobs database is the source of truth; the history is a copy of it, kept 30 days.',
       },
     ],
     assumes: [
@@ -827,7 +827,7 @@ export const jobScheduler: Design = {
       'An exact start time. The target is a start within a few seconds at P95; a dispatcher failover adds up to one lease period, and a burst larger than the worker pool adds queue time.',
       'Ordering. Runs of different jobs start in any order, and a slow or retried run of a recurring job can overlap the next occurrence of the same job.',
       'That cancel stops a run in progress at once. Pause only prevents future claims; cancel with stopRunning stops a run at its next checkpoint, and a job that never checkpoints runs to its timeout.',
-      'That every missed occurrence runs after an outage. That depends on the catch-up policy of the job.',
+      'That every missed occurrence runs after an outage. That depends on the catch-up policy of the job; an occurrence it skips is recorded as a skipped run, not executed.',
     ],
   },
   failures: [
@@ -836,7 +836,7 @@ export const jobScheduler: Design = {
       impact:
         'Jobs in those partitions stop being claimed. Nothing is lost, because unclaimed jobs are still rows in the table, but they start up to one lease period late (about 10 s with a 10 s lease).',
       detection:
-        'The lease is not renewed. A per-partition metric, the age of the oldest due job that is still unclaimed, crosses its alarm threshold of 10 s.',
+        'The lease is not renewed. A per-partition metric, the age of the oldest due job that is still unclaimed, climbs toward its alarm threshold of 20 s, two lease periods, and crosses it if no dispatcher takes the lease; a normal takeover stays near one.',
       recovery:
         'Another dispatcher takes the expired lease with a higher epoch and claims the backlog on its next poll. If the old dispatcher was only paused and wakes up, its claim transaction fails the epoch check and it drops the partition.',
     },
@@ -846,9 +846,9 @@ export const jobScheduler: Design = {
       impact:
         'The runs exist and are marked dispatched, but no message carries them. Without a second mechanism they would never start, and recurring jobs would look healthy because their next run time has already advanced.',
       detection:
-        'The sweeper scans for runs still in the dispatched state past their deadline (about 30 s). The count of swept runs is a metric; a steady rise means dispatchers are dying or the queue is rejecting writes.',
+        'The sweeper scans for runs still in the dispatched state past their deadline (about 30 s). The count of runs it re-sends for the first time is a metric; a steady rise means dispatchers are dying, the queue is rejecting writes, or runs are waiting in the queue for more than 30 s.',
       recovery:
-        'The sweeper enqueues the run again. If the first message did reach the queue, two messages now exist and the conditional start lets only one worker run it. The run starts at most one deadline late.',
+        'The sweeper enqueues the run again. If the first message did reach the queue, two messages now exist and the conditional start lets only one worker run it. The run starts at most one deadline late. If it is still not started, the sweeper doubles its wait on each further re-send, from 30 s up to 10 minutes.',
     },
     {
       scenario: 'A worker stalls or dies in the middle of a run, then possibly comes back.',
@@ -857,7 +857,7 @@ export const jobScheduler: Design = {
       detection:
         'Heartbeats stop. After three missed intervals (about 30 s at one every 10 s) the sweeper, which also watches heartbeats, declares the run lost. A counter of lost runs per job type shows a handler that hangs.',
       recovery:
-        'The sweeper marks the attempt lost with one conditional update that raises the attempt number and returns the run to dispatched with a new deadline of now + backoff + 30 s, then sends a new message with the backoff delay. If that send is lost, its next pass finds the run past its deadline. The old message reappears after its visibility timeout and is dropped by the conditional start, because its attempt number is stale. The attempt number acts as the fencing token: the result of the old attempt is rejected by the scheduler, and the systems the job calls dedupe on the run id. The run ends recorded once, and its external effects happen once as long as those systems honor the key.',
+        'The sweeper marks the attempt lost with one conditional update that adds it to the attempt list on the run row, raises the attempt number and returns the run to dispatched with a new deadline of now + backoff + 30 s, then sends a new message with the backoff delay. If that send is lost, its next pass finds the run past its deadline. If the lost attempt was the last one allowed, the sweeper records the run dead-lettered instead and sends it to the dead-letter queue, the same record-then-send path the worker uses, so a handler that kills its worker or hits its hard timeout every time still ends. The old message reappears after its visibility timeout and is dropped by the conditional start, because its attempt number is stale. The attempt number acts as the fencing token: the result of the old attempt is rejected by the scheduler, and the systems the job calls dedupe on the run id. The run ends recorded once, and its external effects happen once as long as those systems honor the key.',
     },
     {
       scenario: 'The queue delivers the same run twice, or a retry overtakes the original message.',
@@ -866,24 +866,24 @@ export const jobScheduler: Design = {
       detection:
         'The conditional update that moves the run from dispatched to running for that attempt changes no row. Each such case increments a duplicates-dropped counter.',
       recovery:
-        'The worker that lost the update acknowledges the message and does nothing else. No state changes, and the run continues on the worker that won.',
+        'The worker that lost the update, and does not find its own start token on the row, acknowledges the message and does nothing else. No state changes, and the run continues on the worker that won.',
     },
     {
       scenario: 'The primary of the jobs database fails and a replica is promoted.',
       impact:
         'For the tens of seconds of the failover the API rejects new jobs and no dispatcher can claim, so every job that comes due in that window starts late. Runs already on workers continue, but cannot record their result until the database is back.',
       detection:
-        'Database health checks, the API error rate and the unclaimed-age metric on every partition at once. The "Runs starting late" alarm fires for the jobs due in the window, and "Runs overdue or stuck" only if the outage outlasts a retry window.',
+        'Database health checks and the API error rate. The monitor task cannot query the database either, so its three metrics go missing, and their alarms treat missing data as breaching: "Partition not claiming", "Runs starting late" and "Runs overdue or stuck" all fire. The last one clears with the first data point after the failover, unless the outage outlasted a retry window.',
       recovery:
-        'A replica is promoted; it reads the same quorum storage, so it has every acknowledged job and claim. Dispatchers renew or retake their leases, the due backlog drains as a small burst, callers retry their POST with the same idempotency key, and workers retry their result write. Runs that were declared lost in the meantime are retried, which the run id makes harmless.',
+        'A replica is promoted; it reads the same quorum storage, so it has every acknowledged job and claim. Dispatchers renew or retake their leases, the due backlog drains as a small burst, callers retry their POST with the same idempotency key, and workers retry their result write and their heartbeat. The sweeper, whose own queries failed during the outage, waits one heartbeat timeout (30 s) after its first successful query before it declares any run lost, so a healthy worker lands its heartbeat or result first and the outage does not turn its run into a lost attempt.',
     },
     {
       scenario:
         'A burst is larger than the worker pool, or one job type hangs and occupies the workers.',
       impact:
-        'Dispatch stays on time but runs wait in the queue, so start lateness grows for every job that shares the pool. Nothing is lost.',
+        'Dispatch stays on time but runs wait in the queue, so start lateness grows for every job that shares the pool. Nothing is lost. A run that waits more than 30 s gets a second message from the sweeper, which then doubles its wait up to 10 minutes; the conditional start drops the extra copies.',
       detection:
-        'The P95 of start lateness, which has an alarm, and the age of the oldest message in the queue on the dashboard. Per-type concurrency shows which job type is holding the workers.',
+        'The P95 of start lateness, which has an alarm, and the age of the oldest message in the queue on the dashboard. "Lost dispatches" fires too once runs wait past 30 s, because the sweeper re-sends them. Per-type concurrency shows which job type is holding the workers.',
       recovery:
         'Workers scale on queue depth, and for known peaks they are added ahead of time from the count of jobs due in the next minutes, which the due index already knows. A per-type concurrency cap and a run timeout keep one type from taking the whole pool. The backlog drains, in no particular order, and the system is left consistent, only late.',
     },
@@ -916,7 +916,7 @@ export const jobScheduler: Design = {
         label: 'Database writes',
         value:
           '~5K rows/s average; ~100K in the peak second, then ~50K start and ~50K finish commits',
-        math: '4 row writes per run (claim, run record, start, finish) × 1,160/s ≈ 4,600/s. At the peak, 50,000 claims × 2 rows (job + run record) = 100,000 rows in 4 × 25 = 100 batched transactions. The 50,000 starts and 50,000 finishes that follow are one commit per run, over the next few seconds',
+        math: '4 row writes per run (claim, run record, start, finish) × 1,160/s ≈ 4,600/s. At the peak, 50,000 claims × 2 rows (job + run record) = 100,000 rows in 4 × 25 = 100 batched transactions. The 50,000 starts and 50,000 finishes that follow are one commit per run: the starts within a second or two, inside the 3 s of the lateness alarm because the 1,000 workers are already there, and the finishes about 2 s after them',
       },
       {
         label: 'Worker slots',
@@ -933,7 +933,7 @@ export const jobScheduler: Design = {
       'The peak is about 43 times the average, so every tier is sized or pre-scaled for the burst, and the lateness target is checked at midnight, not on a daily average.',
       'A single dispatcher that claims one row per transaction is 250 times too slow for the peak second. Four of them are still about 60 times too slow (800 claims a second), so partitions alone are not enough: claims are also batched, 500 rows per transaction, skipping locked rows.',
       'The workload is write-heavy: each run costs about four row writes and almost no reads beyond the due poll. Read replicas do not help; the write throughput of the primary sets the limit. The 100K claim rows of the peak second fit in about 100 batched transactions (4 dispatchers × 25 batches), but each start and each finish is its own commit, so the primary also takes tens of thousands of small commits a second for the few seconds after midnight.',
-      'Jobs and their due index (about 50 GB and a few GB) fit one database shard with the index in memory, so polling stays cheap. Run rows stay in that database for about a day (about 30 GB), in daily partitions that are dropped once every run in them is finished and copied to the history. History is 20 times larger than the jobs and append-only, so it lives in its own append-friendly store, DynamoDB on AWS, and expires through a 30-day TTL.',
+      'Jobs and their due index (about 50 GB and a few GB) fit one database shard with the index in memory, so polling stays cheap. Run rows stay in that database for about a day (about 30 GB), in daily partitions that are dropped once every run in them is finished and copied to the history. Dead-lettered runs are the exception: their rows move to a small table kept until the run is replayed or its 14 days in the dead-letter queue end, so a replay still finds its row. History is 20 times larger than the jobs and append-only, so it lives in its own append-friendly store, DynamoDB on AWS, and expires through a 30-day TTL.',
       'Worker demand jumps 20 times in one second, faster than scaling on queue depth can react. The due index already knows how many jobs come due in the next minutes, so workers are added before the peak instead of after it.',
       'The partition count is fixed and much larger than the dispatcher count (for example 256 partitions for 4 dispatchers), so dispatchers can be added by moving leases, with no rehash of jobs.',
     ],
@@ -948,14 +948,14 @@ export const jobScheduler: Design = {
         service: 'Application Load Balancer and Amazon ECS on AWS Fargate',
         why: 'A stateless HTTP API that validates, checks the caller’s identity and writes one row; it scales on request count.',
         watch:
-          'ALB HTTPCode_Target_5XX_Count and TargetResponseTime; custom: POSTs answered from an existing idempotency key.',
+          'ALB HTTPCode_Target_5XX_Count plus HTTPCode_ELB_5XX_Count over RequestCount plus HTTPCode_ELB_503_Count, and TargetResponseTime; custom: POSTs answered from an existing idempotency key.',
       },
       {
         part: 'Jobs, runs and leases',
         service: 'Amazon Aurora PostgreSQL, one writer and a replica in another zone',
         why: 'FOR UPDATE SKIP LOCKED, unique keys and one transaction for claim, run record, next run and lease epoch. Every commit is stored on a quorum of copies across three zones before it is acknowledged.',
         watch:
-          'CommitLatency, CommitThroughput, CPUUtilization, DatabaseConnections, Deadlocks; custom: oldest unclaimed due job per partition.',
+          'CommitLatency, CommitThroughput, CPUUtilization, DatabaseConnections, Deadlocks; custom: oldest unclaimed due job per partition, published by the monitor task.',
       },
       {
         part: 'Dispatchers',
@@ -977,19 +977,20 @@ export const jobScheduler: Design = {
           'Amazon ECS on Fargate, or on EC2 for the peak, scaled on queue depth plus scheduled scale-out',
         why: 'Jobs may run longer than a function allows, and the midnight peak needs about 1,000 workers added before 00:00, not after.',
         watch:
-          'ECS RunningTaskCount against desired; custom: start lateness P95, lost runs and duplicates dropped per job type.',
+          'ECS RunningTaskCount against desired; custom: start lateness P95 from the monitor task, lost runs and duplicates dropped per job type.',
       },
       {
         part: 'Sweeper',
         service: 'A small always-on Amazon ECS task',
         why: 'Every few seconds it scans for runs dispatched but not started and for runs whose heartbeats stopped, finer than the one-minute minimum of EventBridge schedules.',
-        watch: 'Custom: runs re-enqueued per minute, runs declared lost per job type.',
+        watch:
+          'Custom: runs re-enqueued for the first time per minute, published even when zero, and runs declared lost per job type.',
       },
       {
         part: 'Run history',
         service:
           'Amazon DynamoDB: job id as partition key, scheduled time and attempt as sort key, TTL of 30 days',
-        why: 'Append-only and twenty times larger than the jobs; one query answers GET /jobs/{id}/runs, and expired items delete themselves. It is a copy: the run record in Aurora is the source of truth, and a daily replay fills in any append that was lost.',
+        why: 'Append-only and twenty times larger than the jobs; one query answers GET /jobs/{id}/runs, and expired items delete themselves. The API merges into that answer the job’s run rows still in Aurora, about the last day, so a run in progress or a lost append still shows. It is a copy: the run record in Aurora is the source of truth, and a daily replay fills in any append that was lost, from the attempt list each run row keeps.',
         watch: 'WriteThrottleEvents and ConsumedWriteCapacityUnits, which jump at midnight.',
       },
       {
@@ -997,7 +998,7 @@ export const jobScheduler: Design = {
         service: 'An SQS dead-letter queue, with a CloudWatch alarm routed to the owning team',
         why: 'Runs past their last attempt wait there with their error until the team fixes and replays them.',
         watch:
-          'Custom: runs dead-lettered, with job type and owner dimensions, emitted by the worker. ApproximateNumberOfMessagesVisible on the dead-letter queue, which has only a queue name dimension, is the global backstop.',
+          'Custom: runs dead-lettered, with job type and owner dimensions, emitted in the step that sends the dead letter and marks it as sent, by the worker or by the sweeper that repeats it. NumberOfMessagesSent on the dead-letter queue, which has only a queue name dimension, is the global backstop; ApproximateNumberOfMessagesVisible shows how many still wait for a replay.',
       },
       {
         part: 'Reconciler',
@@ -1014,8 +1015,9 @@ export const jobScheduler: Design = {
       },
       {
         part: 'Observability and cost',
-        service: 'Amazon CloudWatch dashboards and alarms, AWS Cost Explorer',
-        why: 'One dashboard with the SLOs below. The bill is mostly the workers held for the peak and Aurora’s writes, so flattening the midnight spike is also a cost lever.',
+        service:
+          'Amazon CloudWatch dashboards and alarms, a small monitor task on Amazon ECS, AWS Cost Explorer',
+        why: 'One dashboard with the SLOs below. The monitor task is separate from the dispatchers, the workers and the sweeper: every minute it queries the tables and publishes the oldest unclaimed due job per partition, start lateness and the runs past their retry window, and their alarms treat missing data as breaching, so a dead publisher or an unreachable database pages instead of going quiet. The bill is mostly the workers held for the peak and Aurora’s writes, so flattening the midnight spike is also a cost lever.',
         watch: 'The SLO dashboard, and workers, Aurora and SQS as separate lines in Cost Explorer.',
       },
     ],
@@ -1023,6 +1025,7 @@ export const jobScheduler: Design = {
       'EventBridge schedules run at most once a minute, so anything that must poll every few seconds, like the sweeper, runs as a small always-on task.',
       'An SQS message is at most 1 MiB and its visibility timeout at most 12 hours. Messages carry the run id and attempt number, never the payload, so the database stays the only copy of it, and long jobs extend their visibility while they heartbeat.',
       'SendMessageBatch takes at most 10 messages per call, so a claim of 500 runs is sent as 50 calls in parallel, and a queue keeps a message for at most 14 days, which bounds how long a dead letter can wait for a replay.',
+      'An SQS message can be delayed for at most 15 minutes, so the retry backoff is capped at 15 minutes.',
       'SQS standard queues deliver at least once and do not keep order, which the conditional start and the run id already handle.',
       'An Aurora failover takes tens of seconds, during which nothing can be claimed; the design treats it as a late start, not a loss.',
       'AWS Lambda stops a function after 30 minutes and long jobs can run for hours, so workers run on ECS; a job type that always finishes in seconds could use Lambda.',
@@ -1033,49 +1036,57 @@ export const jobScheduler: Design = {
       objective: 'Start on time',
       target: '95% of runs start within 5 s of their scheduled time, measured at midnight too',
       measure:
-        'Start lateness, the worker’s start time minus the scheduled time, from the run records.',
+        'Start lateness, the worker’s start time minus the scheduled time, with a due run that has not started, or a due job that is not yet claimed, counted at its current age. The monitor task computes it from the run records and the due index every minute.',
     },
     {
       objective: 'No lost jobs',
-      target: 'Every acknowledged job and every due occurrence has a run record',
+      target:
+        'Every due occurrence of an acknowledged job has a run record within 3 hours of its scheduled time',
       measure:
-        'A reconciliation job compares due occurrences with run records per hour; any gap pages.',
+        'The hourly reconciler compares due occurrences with run records and inserts any missing run, normally about an hour after it was due; any gap pages. An occurrence that is still unclaimed is late, not a gap, and "Partition not claiming" pages for it long before the 3 hours.',
     },
     {
       objective: 'Every run accounted for',
-      target: '99.9% of runs reach succeeded, dead-lettered or cancelled within their retry window',
-      measure: 'Runs still dispatched or running past their window, from the runs table.',
+      target:
+        '99.9% of runs reach succeeded, dead-lettered, cancelled or skipped within their retry window',
+      measure:
+        'Runs still dispatched or running past their window, counted from the runs table every minute by the monitor task.',
     },
     {
       objective: 'Scheduling API',
       target: '99.9% of POST /jobs succeed, 99% within 300 ms',
-      measure: 'ALB 5XX count and target response time on the API.',
+      measure:
+        'At the ALB, which serves only this API: (HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / (RequestCount + HTTPCode_ELB_503_Count), and TargetResponseTime P99. The target count leaves out the errors the load balancer answers itself when the API tasks are down, and RequestCount leaves out the requests it rejects with a 503 before it chooses a target.',
     },
   ],
   alarms: [
     {
       name: 'Partition not claiming',
-      metric: 'Custom: oldest unclaimed due job above 10 s in any partition',
+      metric:
+        'Custom: oldest unclaimed due job above 20 s, two lease periods, in any partition, published by the monitor task; missing data counts as breaching',
       meaning:
-        'A dispatcher died or lost its lease and no one took it yet, or the database cannot take claims.',
+        'A dispatcher died or lost its lease and no one took it yet, or the database cannot take claims. No data means the monitor cannot reach the database, or is down itself.',
     },
     {
       name: 'Runs starting late',
       metric:
-        'Custom: start lateness P95 above 5 s for 5 minutes, the SLO level; it pages above 30 s. SQS ApproximateAgeOfOldestMessage stays on the dashboard, because it also counts messages held by a worker that is still running',
+        'Custom: start lateness P95 above 3 s in any one-minute period, under the 5 s of the SLO so it fires before the miss and on a burst as short as midnight; published by the monitor task, and missing data counts as breaching. SQS ApproximateAgeOfOldestMessage stays on the dashboard, because it also counts messages held by a worker that is still running',
       meaning:
-        'Dispatch is fine but workers are short: scale out, or a job type is hogging the pool.',
+        'Runs are not starting on time. If "Partition not claiming" is quiet, dispatch is fine and workers are short: scale out, or a job type is hogging the pool. If it fires too, dispatchers or the database are behind.',
     },
     {
       name: 'Runs overdue or stuck',
-      metric: 'Custom: runs still dispatched or running past their retry window, above zero',
+      metric:
+        'Custom: runs still dispatched or running past their retry window, above zero, which is far inside the 0.1% the SLO allows; published by the monitor task, and missing data counts as breaching',
       meaning:
-        'A run neither finished nor was dead-lettered in time: a handler hangs while it still heartbeats, or the sweeper is not running.',
+        'A run neither finished nor was dead-lettered in time: it is stuck in a backed-up queue or behind a tenant cap, or the sweeper that should retry or dead-letter it is not running.',
     },
     {
       name: 'Lost dispatches',
-      metric: 'Custom: runs re-enqueued by the sweeper above a steady baseline',
-      meaning: 'Dispatchers crash between commit and enqueue, or SQS is rejecting sends.',
+      metric:
+        'Custom: runs re-enqueued by the sweeper for the first time, above a steady baseline; the sweeper publishes it every minute, zero included, and missing data counts as breaching',
+      meaning:
+        'Dispatchers crash between commit and enqueue, SQS is rejecting sends, or runs are waiting in the queue for more than 30 s, in which case "Runs starting late" fires too. No data means the sweeper is down.',
     },
     {
       name: 'Workers dying mid-run',
@@ -1086,15 +1097,15 @@ export const jobScheduler: Design = {
     {
       name: 'New dead letters',
       metric:
-        'Custom: runs dead-lettered, by job type and owner, above zero; SQS ApproximateNumberOfMessagesVisible on the dead-letter queue above zero as the global backstop',
+        'Custom: runs dead-lettered, by job type and owner, above zero; SQS NumberOfMessagesSent on the dead-letter queue above zero as the global backstop, which counts each new send, while the number of visible messages stays above zero for as long as any dead letter waits for a replay',
       meaning: 'A job exhausted its attempts; the owning team fixes the cause and replays it.',
     },
     {
       name: 'Missing runs',
       metric:
-        'Custom: occurrences without a run record found by the hourly reconciliation, above zero',
+        'Custom: occurrences without a run record found by the hourly reconciliation, above zero, or no completed reconciliation for 90 minutes; both come well before the 3 hours of the SLO',
       meaning:
-        'The reconciler repaired them, but something skipped a run: a claim bug or a wrong schedule. Find it before it repeats.',
+        'The reconciler repaired them, but something skipped a run: a claim bug or a wrong schedule. Find it before it repeats. With no completed pass, the reconciler itself is failing, and its next pass covers everything since the last one.',
     },
     {
       name: 'Tenant over its cap',
@@ -1105,9 +1116,9 @@ export const jobScheduler: Design = {
     {
       name: 'Scheduling API failing',
       metric:
-        'ALB HTTPCode_Target_5XX_Count above 0.1% of requests, or TargetResponseTime P99 above 300 ms, for 5 minutes',
+        'ALB (HTTPCode_Target_5XX_Count + HTTPCode_ELB_5XX_Count) / (RequestCount + HTTPCode_ELB_503_Count) above 0.05%, or TargetResponseTime P99 above 250 ms, for 5 minutes; both sit under the SLO levels of 0.1% and 300 ms. Also HTTPCode_ELB_5XX_Count above zero for 5 minutes, and a missing RequestCount counts as breaching, because with no API task registered the load balancer reports no RequestCount',
       meaning:
-        'Callers cannot schedule jobs: the API tasks, or the database behind them, are failing or slow.',
+        'Callers are close to not being able to schedule jobs: the API tasks, or the database behind them, are failing or slow. The load balancer’s own 5XX count is what shows tasks that are down, when no request reaches a target.',
     },
     {
       name: 'Database saturated',
