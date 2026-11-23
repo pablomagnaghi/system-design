@@ -101,7 +101,7 @@ export const flashSale: Design = {
       method: 'POST',
       path: '/reservations/{id}/pay',
       description:
-        'Body: payment token, paymentKey (one per press of pay). Pays for a reservation before its deadline. Returns 200 when paid, also on a repeat for a reservation that is already paid; 402 when the card is declined (up to three declines); 410 when the reservation has expired or was cancelled; 503 when the payment could not be tried, with the hold kept.',
+        'Body: payment token, paymentKey (one per press of pay). Pays for a reservation before its deadline. Returns 200 when paid, also on a repeat for a reservation that is already paid; 402 when the card is declined, and on every call after a third decline, which starts no new authorization, so the hold runs out at its deadline; 410 when the reservation has expired or was cancelled; 503 when the payment could not be tried, with the hold kept.',
     },
   ],
   dataFlow: [
@@ -205,7 +205,7 @@ export const flashSale: Design = {
     ],
     edgeStages: [
       { edge: ['edge', 'checkout'], stages: [1] },
-      { edge: ['room', 'counter'], stages: [6, 8] },
+      { edge: ['room', 'counter'], stages: [6, 7, 8, 9] },
     ],
     stages: [
       {
@@ -301,7 +301,7 @@ export const flashSale: Design = {
         narration:
           'Checkout writes the reservation to a durable table before the buyer hears "reserved": its id, the buyer, the quantity, a deadline 5 minutes away and the status "reserved". The write only succeeds if no reservation with that id exists, so a repeat changes nothing.',
         tradeoff:
-          'Answering from the counter alone is fastest, but a reservation needs a life of its own: it is paid or it expires, and the counter must be rebuildable from it. The decrement and the write are two steps. A crash between them leaves a hold with no reservation, which undersells and never oversells; the buyer’s retry with the same key finishes the write, and if no retry comes a background sweeper, which joins in a later stage, finishes it within 30 to 90 seconds, so the hold expires like any unpaid one.',
+          'Answering from the counter alone is fastest, but a reservation needs a life of its own: it is paid or it expires, and the counter must be rebuildable from it. The decrement and the write are two steps. A crash between them leaves a hold with no reservation, which undersells and never oversells; the buyer’s retry with the same key finishes the write, and if no retry comes a background sweeper, which joins in a later stage, finishes it, usually within 30 to 90 seconds, so the hold expires like any unpaid one.',
         nodes: ['checkout', 'log'],
         travel: [['checkout', 'log']],
         short: 'Durable write',
@@ -349,9 +349,12 @@ export const flashSale: Design = {
         metrics: {
           users: '1M',
           requestsPerSecond: '33K',
-          p95Latency: '300 ms',
-          errorRate: '0.2%',
-          custom: [{ label: 'Payments / s at peak', value: '200' }],
+          p95Latency: '30 ms',
+          errorRate: '0.02%',
+          custom: [
+            { label: 'Payments / s at peak', value: '200' },
+            { label: 'Pay p95', value: '300 ms' },
+          ],
         },
         load: { checkout: 30, payments: 45, log: 30, writer: 25, db: 20 },
       },
@@ -360,7 +363,7 @@ export const flashSale: Design = {
         narration:
           'A sweeper joins. Every minute it finds reservations whose deadline passed more than 60 seconds ago, marks each one expired with the same kind of conditional write that pay uses, and then returns its units to the counter. The waiting room sees stock again on its next read and admits more buyers: about 4,000 units come back from the first wave.',
         tradeoff:
-          'Without a release the sale ends "sold out" with unpaid units sitting idle. Releasing needs care: pay and expiry both write "only if still reserved", so a unit is either paid or returned, never both. Because the charge is captured only after pay wins, a buyer who loses the race is not charged. The cost is that units return 6 to 7 minutes after they were reserved, not at once.',
+          'Without a release the sale ends "sold out" with unpaid units sitting idle. Releasing needs care: pay and expiry both write "only if still reserved", so a unit is either paid or returned, never both. Because the charge is captured only after pay wins, a buyer who loses the race is not charged. The cost is that units return 6 to 7 minutes after they were reserved, 8 at worst, not at once.',
         nodes: ['sweeper', 'log', 'counter', 'room'],
         travel: [
           ['sweeper', 'log', 'sweep'],
@@ -371,8 +374,8 @@ export const flashSale: Design = {
         metrics: {
           users: '1M',
           requestsPerSecond: '33K',
-          p95Latency: '300 ms',
-          errorRate: '0.2%',
+          p95Latency: '30 ms',
+          errorRate: '0.02%',
           custom: [{ label: 'Units returned', value: '~4,000' }],
         },
         load: { sweeper: 30, log: 25, counter: 20, room: 25 },
@@ -392,8 +395,8 @@ export const flashSale: Design = {
         metrics: {
           users: '1M',
           requestsPerSecond: '33K',
-          p95Latency: '300 ms',
-          errorRate: '0.2%',
+          p95Latency: '30 ms',
+          errorRate: '0.02%',
           custom: [{ label: 'Stock drift', value: '0' }],
         },
         load: { sweeper: 40, log: 35, counter: 15 },
@@ -623,7 +626,7 @@ export const flashSale: Design = {
           from: 'checkout',
           to: 'table',
           label: 'PUT r-7002 reserved, if absent',
-          note: 'Finishes the write. If Sam had never retried, the sweeper would write this same item on its first run after the hold had been unwritten for 30 seconds, so within 30 to 90 seconds. A hold is only ever completed forward, never undone here, so a slow first call that writes late finds the item already there. Undoing the hold could race that late write and leave a reservation for a unit already returned.',
+          note: 'Finishes the write. If Sam had never retried, the sweeper would write this same item on its first run after the hold had been unwritten for 30 seconds, so usually within 30 to 90 seconds. A hold is only ever completed forward, never undone here, so a slow first call that writes late finds the item already there. Undoing the hold could race that late write and leave a reservation for a unit already returned.',
         },
         {
           from: 'checkout',
@@ -666,7 +669,7 @@ export const flashSale: Design = {
           from: 'checkout',
           to: 'psp',
           label: 'authorize, key r-5521-p-3',
-          note: 'The key is the reservation id and the payment key, so a repeated call never authorizes twice. The call times out after 10 seconds, and at most 300 are in flight at once, a fixed share per checkout task, so the rest of the store keeps its share of the provider. Only a decline counts toward the three allowed; a timeout, a provider error or a call refused by the cap does not.',
+          note: 'The key is the reservation id and the payment key, so a repeated call never authorizes twice. The call times out after 10 seconds, and at most 300 are in flight at once, a fixed share per checkout task, so the rest of the store keeps its share of the provider. Only a decline counts toward the three allowed; a timeout, a provider error or a call refused by the cap does not. After the third decline pay answers 402 without calling the provider, and the hold expires at its deadline like any unpaid one.',
         },
         {
           from: 'checkout',
@@ -804,7 +807,7 @@ export const flashSale: Design = {
           from: 'sweeper',
           to: 'psp',
           label: 'void, key r-7044-p-8',
-          note: 'Because a payment was started, the sweeper voids every attempt of the reservation by its key, whether it went through or not, and records the outcome on the attempt. A provider answer that there is nothing to void counts as voided. It tries on up to five runs; an authorization that is never captured lapses on its own, and one still not voided after 15 minutes raises an alarm.',
+          note: 'Because a payment was started, the sweeper voids every attempt of the reservation by its key, whether it went through or not, and records the outcome on the attempt. A provider answer that there is nothing to void counts as voided; an authorization that only reaches the provider after that is never captured, so it lapses on its own. The sweeper tries on up to five runs, and an authorization still not voided after 15 minutes raises an alarm.',
         },
         {
           from: 'app',
@@ -869,7 +872,7 @@ export const flashSale: Design = {
           from: 'checkout',
           to: 'counter',
           label: 'reserve works again',
-          note: 'The next drift check runs within a minute. If the table alone shows more units reserved or paid than the stock, because a reservation was written after the query, the sweeper pauses the sale at once by removing the armed mark, cancels the newest reservations beyond the stock with a conditional write, and voids or refunds their payments. A rebuild follows and counts the cancelled ones as released, so their units are not returned twice.',
+          note: 'The next drift check comes with the next run of the sweeper. If the table alone shows more units reserved or paid than the stock, because a reservation was written after the query, the sweeper pauses the sale at once by removing the armed mark, cancels the newest reservations beyond the stock with a conditional write, and voids or refunds their payments. A rebuild follows and counts the cancelled ones as released, so their units are not returned twice.',
         },
       ],
     },
@@ -1067,7 +1070,7 @@ export const flashSale: Design = {
       {
         property: 'Orders',
         promise:
-          'Every captured reservation becomes one order in the store, and one cancelled after capture has its order marked cancelled. The change stream delivers at least once, made harmless by the unique reservation id on the order, and a daily comparison of captured reservations with orders catches anything the stream dropped.',
+          'Every captured reservation becomes one order in the store, and one cancelled after capture has its order marked cancelled. The change stream delivers at least once, made harmless by the unique reservation id on the order. On every run the sweeper compares reservations captured more than 2 minutes ago with orders, status included: it writes any order that is missing, with the current status of its reservation, and marks cancelled the order of a reservation cancelled more than 2 minutes ago, which catches anything the stream dropped.',
       },
     ],
     assumes: [
@@ -1083,7 +1086,7 @@ export const flashSale: Design = {
       'A unit for every admitted buyer. About 25,000 buyers are admitted for the first 15,400 reservations; the counter decides, and the rest hear "all units are held".',
       'Strict first come, first served. Early arrivals are in random order on purpose, and a returned unit goes to whoever reserves it first among admitted buyers.',
       'An exact place in line. The place is computed by the app from a status up to a second old, and early places are estimates until the start.',
-      'That returned units are available at once. An unpaid unit is back on sale 6 to 7 minutes after it was reserved.',
+      'That returned units are available at once. An unpaid unit is back on sale 6 to 7 minutes after it was reserved, 8 at worst.',
       'One ticket per person. It is one per account; a person with many real accounts gets many draws, which the account rules and the audit limit but do not remove.',
       'A second chance for a payment that started in time and was answered too late: the hold expires and the buyer is not charged.',
       'A hold through every payment outage. The 5-minute extension starts when the alarm fires, about two minutes into an outage; a hold whose deadline fell in the first minute or so can expire before that, and an outage longer than the extension expires holds too. Nobody is charged for an expired hold.',
@@ -1097,15 +1100,16 @@ export const flashSale: Design = {
       impact:
         'One hold exists with no reservation. The buyer has no answer, and the unit is unavailable to others.',
       detection:
-        'The counter lists the hold as not yet written. A custom metric tracks the age of the oldest such hold, with an alarm at 2 minutes.',
+        'The counter lists the hold as not yet written. A custom metric from the probe tracks the age of the oldest such hold, with an alarm at 3 minutes.',
       recovery:
-        'The retry with the same idempotency key returns the same hold and writes the reservation. Without a retry, the sweeper writes it on its first run after the hold is 30 seconds old, so within 30 to 90 seconds; the buyer can find it in their reservations, and unpaid it expires and returns the unit like any other.',
+        'The retry with the same idempotency key returns the same hold and writes the reservation. Without a retry, the sweeper writes it on its first run after the hold is 30 seconds old, so usually within 30 to 90 seconds; the buyer can find it in their reservations, and unpaid it expires and returns the unit like any other.',
     },
     {
       scenario: 'The primary node of the counter store fails.',
       impact:
         'Reserve calls fail while a replica is promoted, typically under 20 seconds. Buyers see "paused, your place is kept"; the room reads no stock, so it admits nobody.',
-      detection: 'Server errors on reserve, and the failover event of the store.',
+      detection:
+        'Server errors on reserve, from the targets and from the load balancer, and the failover event of the store.',
       recovery:
         'A replica is promoted with every acknowledged write, because writes are logged in several zones before they are answered, so no rebuild is needed. Apps retry with the same key, and a pass that ran out is renewed.',
     },
@@ -1115,7 +1119,7 @@ export const flashSale: Design = {
       impact:
         'The sale pauses: well under a minute for a drift rebuild with the counter alive, about two minutes for a lost store. No reservation is lost, because every reservation a buyer was told about is in the table.',
       detection:
-        'Scripts find no armed mark and answer "paused", and the sweeper or the waiting room starts the rebuild as soon as either sees that on an open sale; or the stock drift metric is not zero for three checks in a row.',
+        'Scripts find no armed mark and answer "paused", and the sweeper or the waiting room starts the rebuild as soon as either sees that on an open sale; or the stock drift metric is not zero for two checks in a row, counted by the sweeper.',
       recovery:
         'The rebuild job removes the armed mark, completes or waits out unwritten holds, reads every reservation with consistent reads, sets stock to the total minus the units reserved or paid, restores the open holds with their idempotency keys, and arms the counter. If the table then shows more units than the stock, the armed mark is removed again, the newest reservations beyond it are cancelled and another rebuild follows. After three automatic rebuilds in an hour the sale stays paused and the on-call is paged.',
     },
@@ -1133,7 +1137,7 @@ export const flashSale: Design = {
       impact:
         'Buyers cannot pay through no fault of their own, and their holds approach the deadline.',
       detection:
-        'Authorization errors above 5%, latency above 5 seconds, or pay calls ending in a server error above 5%, for 2 minutes, measured at checkout.',
+        'Authorization errors above 5%, p95 latency above 5 seconds, or pay calls ending in a server error above 5%, for 2 minutes, measured at checkout, which publishes every period, also at zero; no data from checkout counts as failing.',
       recovery:
         'The alarm calls the sweeper function, which switches on the 5-minute hold extension on the sale record; it is switched off when the alarm clears, or by the on-call, and holds it was protecting are not expired until 60 seconds after that, so a payment that started under the extension can finish. While it is on, the sweeper adds it to every deadline before expiring and checkout adds it before refusing a payment. A hold whose deadline fell in the first minute or so of the outage can expire before the alarm fires, which is the accepted loss. Errors, timeouts and calls beyond 300 in flight get "try again in a moment", are not counted as declines, and the hold stays.',
     },
@@ -1141,25 +1145,25 @@ export const flashSale: Design = {
       scenario: 'A reservation is paid and the capture fails, or checkout crashes between the two.',
       impact: 'The buyer owns the unit and no money has moved. No order exists yet.',
       detection:
-        'The reservation stays in the open list as paid and not captured; the sweeper sees it after a minute.',
+        'The reservation stays in the open list as paid and not captured; the sweeper sees it after a minute. The probe publishes the age of the oldest one, with an alarm at 5 minutes.',
       recovery:
-        'The sweeper captures with the same key on every run; a capture that timed out and is repeated is the same capture to the provider. Only a definitive refusal counts toward a limit of three; errors and timeouts are retried each run until the authorization lapses. After three refusals or a lapsed authorization, the sweeper writes "cancelled" with a condition on "paid and not captured", releases the units, and voids the authorization, or refunds it if a capture turns out to have gone through. The buyer sees the reservation as cancelled in their list, and it stays in the open list until it is released and voided.',
+        'The sweeper captures with the same key on every run; a capture that timed out and is repeated is the same capture to the provider. Only a definitive refusal counts toward a limit of three; errors and timeouts are retried each run until the authorization lapses, which the alarm tells the on-call about long before. After three refusals or a lapsed authorization, the sweeper writes "cancelled" with a condition on "paid and not captured", releases the units, and voids the authorization, or refunds it if a capture turns out to have gone through. The buyer sees the reservation as cancelled in their list, and it stays in the open list until it is released and voided.',
     },
     {
       scenario: 'The order writer falls behind, or the store’s orders database is down.',
       impact:
         'Buyers have paid and see their reservation as paid, but the order is missing from the store for a while.',
       detection:
-        'The age of the oldest record the writer has not processed (IteratorAge), with an alarm at 60 seconds.',
+        'The age of the oldest record the writer has not processed (IteratorAge), with an alarm at 60 seconds. Two more alarms do not depend on the writer running: the count of reservations captured more than 2 minutes ago with no order, or cancelled more than 2 minutes ago with an order not marked cancelled, from the sweeper, and messages in the on-failure queue, each above zero.',
       recovery:
-        'The stream keeps records for 24 hours and the writer retries. Batches that still fail after the retry limit are reported to a queue, and the daily comparison of captured reservations with orders writes any order still missing.',
+        'The stream keeps records for 24 hours, and the writer retries a failing batch until its records are 3 minutes old, longer than the two minutes the alarm takes to fire. Then the batch is reported to a queue and the writer moves on, so one bad record does not hold back the orders behind it. The message in the queue only says where the batch is in the stream, so the repair does not depend on it: on every run the sweeper compares reservations captured more than 2 minutes ago with orders, writes any order still missing with the current status of its reservation, and marks cancelled the order of a reservation cancelled more than 2 minutes ago, in small batches and under the same unique reservation id. While the orders database is down those writes fail too and are tried again on the next run.',
     },
     {
       scenario: 'The sweeper stops running.',
       impact:
         'Unpaid holds are not released, unwritten holds are not completed and the drift check does not run. Units stay held; nothing is oversold.',
       detection:
-        'A custom metric for the oldest reservation still reserved, or ended and not released, past its deadline, published by a probe and not by the sweeper itself, with an alarm at 2.5 minutes; and errors of the function.',
+        'A custom metric for the oldest reservation still reserved, or ended and not released, past its deadline, published by a probe and not by the sweeper itself, with an alarm at 3 minutes; and errors of the function.',
       recovery:
         'The next successful run handles everything that piled up. Every step is conditional or safe to repeat, so a run that overlaps another or repeats work does no harm.',
     },
@@ -1179,7 +1183,7 @@ export const flashSale: Design = {
       'Buyers in line poll the status every 5 seconds, and every 30 seconds once all units are held.',
       'The room admits 1,000 buyers a second, and an admitted buyer takes about 10 seconds to choose and press buy.',
       'A hold lasts 5 minutes, and 20% of holds are never paid.',
-      'The sweeper runs every minute and expires a hold 60 seconds after its deadline.',
+      'The sweeper runs once a minute and expires a hold 60 seconds after its deadline. The scheduler starts each run somewhere inside its minute, so two runs are usually 60 seconds apart and at worst almost two minutes.',
     ],
     estimates: [
       {
@@ -1210,7 +1214,7 @@ export const flashSale: Design = {
       {
         label: 'Units returned',
         value: '~4,000, 6 to 7 minutes after each was reserved',
-        math: '15,400 × 20% ≈ 3,100 unpaid reservations × 1.3 ≈ 4,000 units. 5 min hold + 60 s wait + up to 60 s until the next run',
+        math: '15,400 × 20% ≈ 3,100 unpaid reservations × 1.3 ≈ 4,000 units. 5 min hold + 60 s wait + up to 60 s until the next run = 6 to 7 minutes; when two runs land almost two minutes apart it is 8 at worst',
       },
       {
         label: 'Reservations in the whole sale',
@@ -1251,7 +1255,7 @@ export const flashSale: Design = {
           'Application Load Balancer and Amazon ECS on AWS Fargate; Amazon ElastiCache for Valkey for tickets, the sequence and the line; a signing key per sale in AWS Secrets Manager',
         why: 'Stateless tasks handle 20,000 joins a second and 1,000 pass requests a second; the store holds one small record per account, about 200 MB for a million buyers. Losing it costs a few repeated draws, not stock, and the state of the line is also in the status object, so a cache with replicas is enough here.',
         watch:
-          'ALB RequestCount, TargetResponseTime and HTTPCode_Target_5XX_Count; ElastiCache EngineCPUUtilization and CurrConnections; custom metrics for buyers admitted per second and, from the probe, for the age of the status object.',
+          'ALB RequestCount, TargetResponseTime, HTTPCode_Target_5XX_Count and HTTPCode_ELB_5XX_Count; ElastiCache EngineCPUUtilization and CurrConnections; custom metrics for buyers admitted per second and, from the probe, for the age of the status object.',
       },
       {
         part: 'Checkout API',
@@ -1259,7 +1263,7 @@ export const flashSale: Design = {
           'Amazon ECS on AWS Fargate behind the load balancer, started at full size before the sale, with one target group for reserve and one for pay; Amazon Cognito for the signed-in account',
         why: 'Verifies passes locally and runs reserve and pay. The two routes have their own target groups, so a slow payment provider does not show up as slow reserves. Sized for 2,000 calls a second ahead of time, because the first wave ends before autoscaling could add a task.',
         watch:
-          'Per target group: TargetResponseTime at p99 and HTTPCode_Target_5XX_Count; RejectedConnectionCount on the load balancer; CPUUtilization of the services.',
+          'Per target group: TargetResponseTime at p99 and HTTPCode_Target_5XX_Count; RejectedConnectionCount and HTTPCode_ELB_5XX_Count on the load balancer; CPUUtilization of the services.',
       },
       {
         part: 'Stock counter',
@@ -1283,23 +1287,23 @@ export const flashSale: Design = {
           'An external payment provider called from checkout, with idempotency keys and at most 300 calls in flight, a fixed share per checkout task',
         why: 'Authorize, capture and void are separate calls, which lets the conditional write sit between them. The cap leaves the rest of the store its share of the provider’s rate limit.',
         watch:
-          'Custom metrics at checkout: authorization latency and error rate, calls refused by the cap, authorizations waiting to be voided.',
+          'Custom metrics at checkout: authorization latency and error rate, pay calls ending in a server error, calls refused by the cap. From the probe: oldest reservation paid and not captured, oldest authorization waiting to be voided.',
       },
       {
         part: 'Order writer and orders',
         service:
-          'DynamoDB Streams to an AWS Lambda function that handles one batch per shard at a time, with a retry limit and an Amazon SQS queue as its on-failure destination; Amazon Aurora PostgreSQL, the orders database of the store',
+          'DynamoDB Streams to an AWS Lambda function that handles one batch per shard at a time, with a maximum record age of 3 minutes and an Amazon SQS queue as its on-failure destination; Amazon Aurora PostgreSQL, the orders database of the store',
         why: 'The store receives only captured orders, a few hundred a second at most, however large the rush was. A unique reservation id on the order makes repeated records harmless, and a reservation cancelled after capture marks its order cancelled.',
         watch:
-          'Lambda IteratorAge and Errors; messages in the on-failure queue; Aurora CommitLatency and DatabaseConnections.',
+          'Lambda IteratorAge and Errors; ApproximateNumberOfMessagesVisible of the on-failure queue; Aurora CommitLatency and DatabaseConnections.',
       },
       {
         part: 'Hold sweeper and rebuild',
         service:
           'Amazon EventBridge Scheduler and AWS Lambda; a small probe task on Amazon ECS that publishes the liveness metrics',
-        why: 'One run a minute per sale: complete unwritten holds, expire and release, capture what was left uncaptured, void attempts that did not pay, compare the counter with the table. When stock is zero and no reservation is open, it sets the sold-out mark that the room publishes. The rebuild is the same function, started when the armed mark is missing, by an alarm or by hand; the same function switches the hold extension on and off for the payments alarm, and a daily run compares captured reservations with orders. The probe is separate from the room and the sweeper, so a worker that stops shows as a growing value and not as silence.',
+        why: 'One run a minute per sale: complete unwritten holds, expire and release, capture what was left uncaptured, void attempts that did not pay, compare the counter with the table, and compare reservations captured more than 2 minutes ago with orders, writing any order that is missing and marking cancelled the order of a cancelled reservation. For that comparison it reads every reservation of the sale, about 19,000 items and 10 MB, and looks up their orders by reservation id, a small read on the orders database once a minute. When stock is zero and no reservation is open, it sets the sold-out mark that the room publishes. The rebuild is the same function, started when the armed mark is missing, by an alarm or by hand; the same function switches the hold extension on and off for the payments alarm. The probe is separate from the room and the sweeper, so a worker that stops shows as a growing value and not as silence.',
         watch:
-          'Lambda Errors and Duration; stock drift, published by the sweeper, with missing data paging the on-call; from the probe: oldest reservation still reserved, or ended and not released, past its deadline, oldest unwritten hold, age of the status object.',
+          'Lambda Errors and Duration; stock drift and the count of captured reservations whose order is missing or not marked cancelled when it should be, published by the sweeper, with 3 minutes in a row of missing data paging the on-call; from the probe: oldest reservation still reserved, or ended and not released, past its deadline, oldest unwritten hold, age of the status object.',
       },
       {
         part: 'Security and cost',
@@ -1320,8 +1324,8 @@ export const flashSale: Design = {
       'A DynamoDB partition serves at most 1,000 write units and 3,000 read units a second. A single item for the stock, or one index key for all open reservations, would sit at that limit at 1,000 reserves a second; 16 buckets put each key at about 63.',
       'A new on-demand DynamoDB table accepts 4,000 write units a second at once, and warm throughput can be set higher before a larger sale. A throttled global secondary index throttles writes to its table.',
       'A global secondary index is eventually consistent, so the rebuild reads the table itself with consistent reads; the indexes are only used to find work and to list a buyer’s reservations, and every write they lead to is conditional.',
-      'DynamoDB Streams keeps records for 24 hours. With the default settings a bad record is retried until it expires, which can block a shard for a day, so the writer has a retry limit and an on-failure destination.',
-      'EventBridge Scheduler runs at most once a minute, which sets the pace of the sweeper: a unit returns 6 to 7 minutes after it was reserved.',
+      'DynamoDB Streams keeps records for 24 hours. With the default settings a bad record is retried until it expires, which can block a shard for a day, so the writer has a maximum record age of 3 minutes and an on-failure destination. The message Lambda sends to an SQS destination describes the batch and does not contain its records.',
+      'EventBridge Scheduler runs at most once a minute and starts each run somewhere inside its minute, not on the second, which sets the pace of the sweeper: a unit returns 6 to 7 minutes after it was reserved, or 8 at worst when two runs land almost two minutes apart. Every "next run" of the sweeper in this design can stretch by up to a minute in the same way, and the alarm thresholds leave room for it.',
       'A sweep of a few thousand reservations takes seconds, far below the timeout of a Lambda function.',
       'A DynamoDB stream is read one batch per shard at a time unless a parallelization factor is set, which is what bounds the order writer.',
     ],
@@ -1339,13 +1343,14 @@ export const flashSale: Design = {
       target:
         '99% of reserve calls from admitted buyers answered within 300 ms, and 99.9% without a server error',
       measure:
-        'TargetResponseTime at p99 and HTTPCode_Target_5XX_Count over RequestCount on the reserve target group, which pay calls do not touch, outside the time a sale is paused. Refusals such as "all units held" are answers, not errors.',
+        'TargetResponseTime at p99 on the reserve target group, which pay calls do not touch, and (HTTPCode_Target_5XX_Count of that target group + HTTPCode_ELB_5XX_Count of the load balancer) over the RequestCount of the target group: the target count leaves out the errors the load balancer answers itself when targets are down. The load balancer count has no target group dimension, so an error it generates for the room or for pay counts against reserve too, which is the strict reading. Both outside the time a sale is paused. Refusals such as "all units held" are answers, not errors.',
     },
     {
       objective: 'Line status',
-      target: 'The status at the edge is at most 5 seconds old for 99% of the time a sale is open',
+      target:
+        'The status at the edge is at most 5 seconds old, except for at most 60 seconds in total per sale',
       measure:
-        'A high-resolution custom metric from a probe outside the room: now minus the update time in the status object.',
+        'A high-resolution custom metric from a probe outside the room: now minus the update time in the status object. The seconds it spends above 5 are added up per sale.',
     },
     {
       objective: 'Units return',
@@ -1357,50 +1362,50 @@ export const flashSale: Design = {
       objective: 'Orders',
       target: '99% of captured payments have an order in the store within 5 minutes',
       measure:
-        'Order creation time minus capture time, and the daily comparison of captured reservations with orders.',
+        'Order creation time minus capture time, and the comparison of captured reservations with orders, status included, that the sweeper makes on every run.',
     },
   ],
   alarms: [
     {
       name: 'Stock drift',
       metric:
-        'Custom: stock drift not zero for 3 checks in a row (3 minutes); missing data pages the on-call and starts no rebuild',
+        'Custom: stock drift not zero for 2 checks in a row (about 2 minutes, 3 at worst), counted by the sweeper on the sale record and published as one value; no data for 3 one-minute periods in a row pages the on-call and starts no rebuild',
       meaning:
-        'The counter and the reservations disagree beyond what in-flight calls explain. No data means the sweeper is not checking, which a rebuild by the same function would not fix, so that case goes to the on-call. A drift that is not zero starts the rebuild, which finishes inside the 5-minute target. More units in the table than the stock does not wait for this: the sweeper pauses the sale at once.',
+        'The counter and the reservations disagree beyond what in-flight calls explain. The sweeper counts the checks itself, so a minute with no run does not break the count, and one empty minute does not page: two runs can be almost two minutes apart. Three empty minutes mean the sweeper is not checking, which a rebuild by the same function would not fix, so that case goes to the on-call. A drift that is not zero on two checks starts the rebuild. The second check comes at most 3 minutes after the drift began, even when two runs land almost two minutes apart, which leaves two minutes of the 5-minute target for the alarm to act and for a rebuild that takes well under a minute. More units in the table than the stock does not wait for this: the sweeper pauses the sale at once.',
     },
     {
       name: 'Reserve slow',
       metric: 'TargetResponseTime p99 on the reserve target group above 200 ms for 1 minute',
       meaning:
-        'The counter or the reservations table is slow, below the 300 ms target. The first wave is over before this can fire, so it protects the later waves and the rehearsal; lower the admission rate.',
+        'The counter or the reservations table is slow, below the 300 ms target. Tasks that do not answer report no latency; Reserve errors covers that case. The first wave is over before this can fire, so it protects the later waves and the rehearsal; lower the admission rate.',
     },
     {
       name: 'Reserve errors',
       metric:
-        'HTTPCode_Target_5XX_Count above 0.05% of RequestCount on the reserve target group for 1 minute',
+        'HTTPCode_Target_5XX_Count above 0.05% of the RequestCount of the reserve target group for 1 minute, or HTTPCode_ELB_5XX_Count of the load balancer above 12 in 1 minute; missing data is not breaching on either',
       meaning:
-        'Half the error rate the reserve target allows. Usually the counter store failing over, or the table throttling. It also fires during a pause, on purpose.',
+        'Half the error rate the reserve target allows; 12 is that same half for the first wave, where 0.05% of its about 25,000 reserve calls is 12.5. Later waves have fewer calls, so there 12 errors are a larger share of them; the ratio covers those waves while tasks answer. Usually the counter store failing over, or the table throttling. The load balancer count has no target group dimension and cannot be divided by the requests of one route, so it has its own absolute threshold: an error it generates for any route counts, which errs on the side of firing, and without it dead checkout tasks would show no errors at all. With no reserve calls there is no ratio, and the load balancer reports its count only when it is not zero, so no data means no errors on both. It also fires during a pause, on purpose.',
     },
     {
       name: 'Line stopped',
       metric:
         'Custom, high resolution, from the probe: age of the status object above 3 s over one 10-second period; missing data counts as breaching',
       meaning:
-        'The waiting room is not publishing. Nobody new is admitted and buyers are about to see "paused". It fires about 13 seconds into a stop. Several room tasks prevent a stop; the alarm limits how long one lasts and cannot prevent the first seconds of stale status.',
+        'The waiting room is not publishing and nobody new is admitted. It fires about 13 seconds into a stop: buyers have seen "paused" for about 3 seconds, and 8 of the 60 seconds the Line status target allows are spent. Several room tasks prevent a stop; the alarm limits how long one lasts and cannot prevent the first seconds of stale status.',
     },
     {
       name: 'Holds not released',
       metric:
-        'Custom, high resolution, from the probe: oldest reservation still reserved, or ended and not released, more than 2.5 minutes past its deadline over one 30-second period, counting the hold extension when it is on; missing data counts as breaching',
+        'Custom, high resolution, from the probe: oldest reservation still reserved, or ended and not released, more than 3 minutes past its deadline over one 30-second period, counting the hold extension when it is on; missing data counts as breaching',
       meaning:
-        'The sweeper is failing or behind. Normal is at most 2 minutes, the alarm fires at about 3, and the 9-minute target for returned units is missed at 4. Reservations that only wait for a void are not counted: their units are already back.',
+        'The sweeper is failing or behind. Normal is at most 2 minutes, or just under 3 when two runs land almost two minutes apart; the alarm fires at about 3.5, and the 9-minute target for returned units is missed at 4. The threshold cannot sit below the normal worst case, so the early signal of a failing sweeper is the Errors metric of the function, and this alarm bounds the damage. Reservations that only wait for a void are not counted: their units are already back.',
     },
     {
       name: 'Unwritten holds',
       metric:
-        'Custom, from the probe: oldest hold in the counter with no reservation, above 2 minutes; missing data counts as breaching',
+        'Custom, from the probe: oldest hold in the counter with no reservation, above 3 minutes; missing data counts as breaching',
       meaning:
-        'The table is refusing writes or the sweeper is not completing holds. Units are held for buyers who may not know it.',
+        'The table is refusing writes or the sweeper is not completing holds. Normal is at most 90 seconds, or two and a half minutes when two runs land far apart. Units are held for buyers who may not know it.',
     },
     {
       name: 'Table throttling',
@@ -1418,19 +1423,41 @@ export const flashSale: Design = {
     {
       name: 'Payments failing',
       metric:
-        'Custom: authorization errors above 5%, p95 latency above 5 s, or pay calls ending in a server error above 5%, for 2 minutes',
+        'Custom, published by checkout every period, also at zero: authorization errors above 5%, p95 latency above 5 s, or pay calls ending in a server error above 5%, for 2 minutes; missing data counts as breaching',
       meaning:
-        'The payment provider or our own pay path is in trouble. The alarm switches on the 5-minute hold extension, so holds stop expiring while buyers cannot pay; those whose deadline fell in the first minute or so may already have expired.',
+        'The payment provider or our own pay path is in trouble; no data means checkout itself is down, and buyers cannot pay then either. The alarm switches on the 5-minute hold extension, so holds stop expiring while buyers cannot pay; those whose deadline fell in the first minute or so may already have expired.',
     },
     {
       name: 'Orders behind',
-      metric: 'Lambda IteratorAge of the order writer above 60 s for one 1-minute period',
+      metric:
+        'Lambda IteratorAge of the order writer above 60 s for one 1-minute period; missing data is not breaching, because the metric is only reported when the writer runs',
       meaning:
-        'Paid buyers do not see their order in the store yet. It fires about two minutes after the writer stops, well inside the 5-minute target. Check the orders database and the on-failure queue.',
+        'Paid buyers do not see their order in the store yet. It fires about two minutes after the writer starts failing, well inside the 5-minute target and before the 3-minute record age gives up on a batch. Check the orders database. A writer that is not invoked at all is silent here; Orders missing covers that.',
+    },
+    {
+      name: 'Orders missing',
+      metric:
+        'Custom, from the sweeper: reservations captured more than 2 minutes ago with no order, plus those cancelled more than 2 minutes ago with an order not marked cancelled, above 0 on any run; no data for 3 one-minute periods in a row counts as breaching',
+      meaning:
+        'The stream path lost or never delivered a record: the writer is disabled or throttled, or a batch passed its record age. The same run writes the missing orders and marks cancelled the orders that should be, at most about 4 minutes after the capture or the cancellation, inside the 5-minute target, and the alarm clears on the next run that counts zero. One empty minute is normal, because two runs can be almost two minutes apart; three in a row mean the sweeper is not comparing.',
+    },
+    {
+      name: 'Order batches given up',
+      metric: 'SQS ApproximateNumberOfMessagesVisible of the on-failure queue above 0 for 1 minute',
+      meaning:
+        'The writer gave up on a batch after retrying for 3 minutes. The message holds the position of the batch in the stream, not its records; the sweeper writes the orders, and the on-call uses the message to find the record that failed.',
+    },
+    {
+      name: 'Captures stuck',
+      metric:
+        'Custom, from the probe: oldest reservation paid and not captured, above 5 minutes; missing data counts as breaching',
+      meaning:
+        'A buyer owns a unit and no money has moved. Normal is under 3 minutes: the sweeper captures on its first run after a minute. Past 5 the provider is refusing or failing captures, which are retried on every run; check the provider before the authorization lapses.',
     },
     {
       name: 'Voids stuck',
-      metric: 'Custom: authorizations waiting to be voided for more than 15 minutes',
+      metric:
+        'Custom, from the probe: oldest authorization waiting to be voided, above 15 minutes; missing data counts as breaching',
       meaning:
         'Buyers who lost a race still have money held on their card. Void by hand or with the provider.',
     },
